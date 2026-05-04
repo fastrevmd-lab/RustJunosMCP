@@ -1,1 +1,51 @@
-// stub
+//! `gather_device_facts` — return device facts as a JSON object.
+//!
+//! Hand-builds the JSON because `rustez::Facts` does not derive `Serialize`
+//! (followup #1).
+
+use crate::device_manager::DeviceManager;
+use crate::error::JmcpError;
+use crate::helpers::facts_to_json;
+use crate::tools::GatherFactsArgs;
+use serde_json::Value;
+use std::sync::Arc;
+use std::time::Duration;
+
+pub async fn handle(
+    args: GatherFactsArgs,
+    dm: Arc<DeviceManager>,
+) -> Result<Value, JmcpError> {
+    let timeout = Duration::from_secs(args.timeout);
+    let mut dev = dm.open(&args.router_name).await?;
+
+    let facts_result = tokio::time::timeout(timeout, dev.facts())
+        .await
+        .map_err(|_| JmcpError::Timeout(timeout))?;
+    let facts = facts_result?;
+    let value = facts_to_json(facts);
+
+    let _ = dev.close().await;
+    Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inventory::Inventory;
+    use std::io::Write;
+
+    #[tokio::test]
+    async fn unknown_router_propagates_error() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(br#"{
+            "r1":{"ip":"127.0.0.1","username":"u","auth":{"type":"password","password":"x"}}
+        }"#).unwrap();
+        let inv = Arc::new(Inventory::load(f.path()).unwrap());
+        let dm  = Arc::new(DeviceManager::new(inv));
+        let r = handle(
+            GatherFactsArgs { router_name: "nope".into(), timeout: 5 },
+            dm,
+        ).await;
+        assert!(matches!(r, Err(JmcpError::UnknownRouter(_))));
+    }
+}
