@@ -68,3 +68,59 @@ mod auth_tests {
         }
     }
 }
+
+fn default_port() -> u16 { 22 }
+
+/// One entry in `devices.json`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct DeviceEntry {
+    pub ip: String,
+    #[serde(default = "default_port")]
+    pub port: u16,
+    pub username: String,
+    pub auth: AuthConfig,
+    /// Optional path to OpenSSH config file (jumphost). Parsed but not yet
+    /// honored — see [`crate::error::JmcpError::SshConfigUnsupported`].
+    #[serde(default)]
+    pub ssh_config: Option<PathBuf>,
+}
+
+#[cfg(test)]
+mod entry_tests {
+    use super::*;
+
+    #[test]
+    fn parses_password_entry_with_default_port() {
+        let json = r#"{
+            "ip":"10.0.0.1",
+            "username":"admin",
+            "auth":{"type":"password","password":"x"}
+        }"#;
+        let e: DeviceEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(e.ip, "10.0.0.1");
+        assert_eq!(e.port, 22);
+        assert_eq!(e.username, "admin");
+        assert!(e.ssh_config.is_none());
+    }
+
+    #[test]
+    fn parses_ssh_key_entry_with_explicit_port_and_ssh_config() {
+        let json = r#"{
+            "ip":"10.0.0.2",
+            "port":830,
+            "username":"netconf",
+            "ssh_config":"/home/u/.ssh/config_jh",
+            "auth":{"type":"ssh_key","private_key_path":"/k.pem"}
+        }"#;
+        let e: DeviceEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(e.port, 830);
+        assert_eq!(e.ssh_config, Some(PathBuf::from("/home/u/.ssh/config_jh")));
+    }
+
+    #[test]
+    fn rejects_missing_required_fields() {
+        let json = r#"{"username":"admin","auth":{"type":"password","password":"x"}}"#;
+        let r: Result<DeviceEntry, _> = serde_json::from_str(json);
+        assert!(r.is_err(), "expected error for missing 'ip'");
+    }
+}
