@@ -6,15 +6,12 @@ use serde_json::{json, Value};
 
 /// Map the optional `config_format` string from the MCP tool input to
 /// a `rustez::ConfigPayload` constructor closure. Default = "set".
-pub fn build_config_payload(
-    text: String,
-    fmt: Option<&str>,
-) -> Result<ConfigPayload, JmcpError> {
+pub fn build_config_payload(text: String, fmt: Option<&str>) -> Result<ConfigPayload, JmcpError> {
     match fmt.unwrap_or("set") {
-        "set"  => Ok(ConfigPayload::Set(text)),
+        "set" => Ok(ConfigPayload::Set(text)),
         "text" => Ok(ConfigPayload::Text(text)),
-        "xml"  => Ok(ConfigPayload::Xml(text)),
-        other  => Err(JmcpError::BadFormat(other.into())),
+        "xml" => Ok(ConfigPayload::Xml(text)),
+        other => Err(JmcpError::BadFormat(other.into())),
     }
 }
 

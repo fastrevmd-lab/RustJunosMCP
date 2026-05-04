@@ -18,10 +18,12 @@ pub enum AuthConfig {
 impl std::fmt::Debug for AuthConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Password { .. } => f.debug_struct("Password")
+            Self::Password { .. } => f
+                .debug_struct("Password")
                 .field("password", &"<redacted>")
                 .finish(),
-            Self::SshKey { private_key_path } => f.debug_struct("SshKey")
+            Self::SshKey { private_key_path } => f
+                .debug_struct("SshKey")
                 .field("private_key_path", private_key_path)
                 .finish(),
         }
@@ -34,15 +36,22 @@ mod auth_tests {
 
     #[test]
     fn password_debug_does_not_leak_secret() {
-        let auth = AuthConfig::Password { password: "hunter2".into() };
+        let auth = AuthConfig::Password {
+            password: "hunter2".into(),
+        };
         let s = format!("{auth:?}");
-        assert!(!s.contains("hunter2"), "debug output leaked the password: {s}");
+        assert!(
+            !s.contains("hunter2"),
+            "debug output leaked the password: {s}"
+        );
         assert!(s.contains("redacted"));
     }
 
     #[test]
     fn ssh_key_debug_shows_path() {
-        let auth = AuthConfig::SshKey { private_key_path: "/tmp/k.pem".into() };
+        let auth = AuthConfig::SshKey {
+            private_key_path: "/tmp/k.pem".into(),
+        };
         let s = format!("{auth:?}");
         assert!(s.contains("/tmp/k.pem"));
     }
@@ -62,14 +71,17 @@ mod auth_tests {
         let json = r#"{"type":"ssh_key","private_key_path":"/k.pem"}"#;
         let parsed: AuthConfig = serde_json::from_str(json).unwrap();
         match parsed {
-            AuthConfig::SshKey { private_key_path } =>
-                assert_eq!(private_key_path, std::path::PathBuf::from("/k.pem")),
+            AuthConfig::SshKey { private_key_path } => {
+                assert_eq!(private_key_path, std::path::PathBuf::from("/k.pem"))
+            }
             _ => panic!("wrong variant"),
         }
     }
 }
 
-fn default_port() -> u16 { 22 }
+fn default_port() -> u16 {
+    22
+}
 
 /// One entry in `devices.json`.
 #[derive(Clone, Debug, Deserialize)]
@@ -151,19 +163,19 @@ impl Inventory {
     fn validate(devices: &HashMap<String, DeviceEntry>) -> Result<(), JmcpError> {
         for (name, entry) in devices {
             if entry.ip.trim().is_empty() {
-                return Err(JmcpError::InventoryInvalid(
-                    format!("router '{name}': ip is empty"),
-                ));
+                return Err(JmcpError::InventoryInvalid(format!(
+                    "router '{name}': ip is empty"
+                )));
             }
             if entry.port == 0 {
-                return Err(JmcpError::InventoryInvalid(
-                    format!("router '{name}': port must be non-zero"),
-                ));
+                return Err(JmcpError::InventoryInvalid(format!(
+                    "router '{name}': port must be non-zero"
+                )));
             }
             if entry.username.trim().is_empty() {
-                return Err(JmcpError::InventoryInvalid(
-                    format!("router '{name}': username is empty"),
-                ));
+                return Err(JmcpError::InventoryInvalid(format!(
+                    "router '{name}': username is empty"
+                )));
             }
             if let AuthConfig::SshKey { private_key_path } = &entry.auth {
                 if !private_key_path.exists() {
@@ -192,37 +204,49 @@ mod load_tests {
 
     #[test]
     fn loads_valid_password_only_inventory() {
-        let f = write("ok", r#"{
+        let f = write(
+            "ok",
+            r#"{
             "r1":{"ip":"1.2.3.4","username":"u","auth":{"type":"password","password":"x"}}
-        }"#);
+        }"#,
+        );
         let inv = Inventory::load(f.path()).unwrap();
         assert_eq!(inv.devices.len(), 1);
     }
 
     #[test]
     fn rejects_zero_port() {
-        let f = write("p0", r#"{
+        let f = write(
+            "p0",
+            r#"{
             "r1":{"ip":"1.2.3.4","port":0,"username":"u","auth":{"type":"password","password":"x"}}
-        }"#);
+        }"#,
+        );
         let r = Inventory::load(f.path());
         assert!(matches!(r, Err(JmcpError::InventoryInvalid(_))));
     }
 
     #[test]
     fn rejects_empty_ip() {
-        let f = write("ip", r#"{
+        let f = write(
+            "ip",
+            r#"{
             "r1":{"ip":"","username":"u","auth":{"type":"password","password":"x"}}
-        }"#);
+        }"#,
+        );
         let r = Inventory::load(f.path());
         assert!(matches!(r, Err(JmcpError::InventoryInvalid(_))));
     }
 
     #[test]
     fn rejects_missing_key_file() {
-        let f = write("missing", r#"{
+        let f = write(
+            "missing",
+            r#"{
             "r1":{"ip":"1.2.3.4","username":"u",
                   "auth":{"type":"ssh_key","private_key_path":"/nope/missing.pem"}}
-        }"#);
+        }"#,
+        );
         let r = Inventory::load(f.path());
         assert!(matches!(r, Err(JmcpError::KeyFileMissing(_))));
     }
@@ -230,10 +254,13 @@ mod load_tests {
     #[test]
     fn accepts_existing_key_file() {
         let key = tempfile::NamedTempFile::new().unwrap();
-        let json = format!(r#"{{
+        let json = format!(
+            r#"{{
             "r1":{{"ip":"1.2.3.4","username":"u",
                    "auth":{{"type":"ssh_key","private_key_path":"{}"}}}}
-        }}"#, key.path().display());
+        }}"#,
+            key.path().display()
+        );
         let f = write("withkey", &json);
         let inv = Inventory::load(f.path()).unwrap();
         assert_eq!(inv.devices.len(), 1);
@@ -250,7 +277,8 @@ mod load_tests {
 impl Inventory {
     /// Look up a device by name.
     pub fn get(&self, name: &str) -> Result<&DeviceEntry, JmcpError> {
-        self.devices.get(name)
+        self.devices
+            .get(name)
             .ok_or_else(|| JmcpError::UnknownRouter(name.to_string()))
     }
 
@@ -280,27 +308,33 @@ mod accessor_tests {
 
     #[test]
     fn get_returns_known_router() {
-        let inv = build(r#"{
+        let inv = build(
+            r#"{
             "r1":{"ip":"1.1.1.1","username":"u","auth":{"type":"password","password":"x"}}
-        }"#);
+        }"#,
+        );
         assert_eq!(inv.get("r1").unwrap().ip, "1.1.1.1");
     }
 
     #[test]
     fn get_returns_unknown_router_error() {
-        let inv = build(r#"{
+        let inv = build(
+            r#"{
             "r1":{"ip":"1.1.1.1","username":"u","auth":{"type":"password","password":"x"}}
-        }"#);
+        }"#,
+        );
         let r = inv.get("nope");
         assert!(matches!(r, Err(JmcpError::UnknownRouter(ref s)) if s == "nope"));
     }
 
     #[test]
     fn names_returns_sorted() {
-        let inv = build(r#"{
+        let inv = build(
+            r#"{
             "z":{"ip":"1.1.1.1","username":"u","auth":{"type":"password","password":"x"}},
             "a":{"ip":"1.1.1.2","username":"u","auth":{"type":"password","password":"x"}}
-        }"#);
+        }"#,
+        );
         assert_eq!(inv.names(), vec!["a".to_string(), "z".to_string()]);
     }
 }

@@ -34,12 +34,12 @@ impl DeviceManager {
         builder = match &entry.auth {
             AuthConfig::Password { password } => builder.password(password),
             AuthConfig::SshKey { private_key_path } => {
-                let path_str = private_key_path
-                    .to_str()
-                    .ok_or_else(|| JmcpError::InventoryInvalid(
-                        format!("private_key_path is not valid UTF-8: {}",
-                                private_key_path.display())
-                    ))?;
+                let path_str = private_key_path.to_str().ok_or_else(|| {
+                    JmcpError::InventoryInvalid(format!(
+                        "private_key_path is not valid UTF-8: {}",
+                        private_key_path.display()
+                    ))
+                })?;
                 builder.key_file(path_str)
             }
         };
@@ -61,9 +61,11 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_router_returns_unknown_router_error() {
-        let inv = build_inventory(r#"{
+        let inv = build_inventory(
+            r#"{
             "r1":{"ip":"127.0.0.1","username":"u","auth":{"type":"password","password":"x"}}
-        }"#);
+        }"#,
+        );
         let dm = DeviceManager::new(inv);
         let r = dm.open("nope").await;
         assert!(matches!(r, Err(JmcpError::UnknownRouter(ref s)) if s == "nope"));
@@ -71,11 +73,13 @@ mod tests {
 
     #[tokio::test]
     async fn ssh_config_set_returns_unsupported_error() {
-        let inv = build_inventory(r#"{
+        let inv = build_inventory(
+            r#"{
             "r1":{"ip":"127.0.0.1","username":"u",
                   "ssh_config":"/tmp/never-used",
                   "auth":{"type":"password","password":"x"}}
-        }"#);
+        }"#,
+        );
         let dm = DeviceManager::new(inv);
         let r = dm.open("r1").await;
         assert!(matches!(r, Err(JmcpError::SshConfigUnsupported(ref s)) if s == "r1"));

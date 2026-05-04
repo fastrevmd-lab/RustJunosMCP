@@ -4,17 +4,25 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-pub mod router_list;
-pub mod execute_command;
-pub mod get_config;
 pub mod config_diff;
+pub mod execute_command;
 pub mod facts;
+pub mod get_config;
 pub mod load_commit;
+pub mod router_list;
 
-fn default_timeout() -> u64 { 360 }
-fn default_version() -> i64 { 1 }
-fn default_set_format() -> String { "set".into() }
-fn default_commit_comment() -> String { "Configuration loaded via MCP".into() }
+fn default_timeout() -> u64 {
+    360
+}
+fn default_version() -> i64 {
+    1
+}
+fn default_set_format() -> String {
+    "set".into()
+}
+fn default_commit_comment() -> String {
+    "Configuration loaded via MCP".into()
+}
 
 #[derive(Debug, Deserialize, JsonSchema, Default)]
 pub struct EmptyArgs {}

@@ -26,13 +26,19 @@ pub enum JmcpError {
     Timeout(std::time::Duration),
 
     #[error(transparent)]
-    Rustez(#[from] rustez::RustEzError),
+    Rustez(Box<rustez::RustEzError>),
 
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+impl From<rustez::RustEzError> for JmcpError {
+    fn from(e: rustez::RustEzError) -> Self {
+        JmcpError::Rustez(Box::new(e))
+    }
 }
 
 #[cfg(test)]
@@ -65,9 +71,6 @@ mod tests {
     #[test]
     fn bad_rollback_version_shows_value_and_range() {
         let e = JmcpError::BadRollbackVersion(99);
-        assert_eq!(
-            e.to_string(),
-            "rollback version 99 out of range (1..=49)"
-        );
+        assert_eq!(e.to_string(), "rollback version 99 out of range (1..=49)");
     }
 }

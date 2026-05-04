@@ -6,11 +6,11 @@
 //! ```
 
 use rust_junosmcp_core::{
-    DeviceManager, Inventory,
     tools::{
-        ConfigDiffArgs, ExecuteCommandArgs, GatherFactsArgs, GetConfigArgs,
-        config_diff, execute_command, facts, get_config, router_list,
+        config_diff, execute_command, facts, get_config, router_list, ConfigDiffArgs,
+        ExecuteCommandArgs, GatherFactsArgs, GetConfigArgs,
     },
+    DeviceManager, Inventory,
 };
 use std::io::Write;
 use std::sync::Arc;
@@ -23,10 +23,12 @@ fn build_dm() -> Arc<DeviceManager> {
     let host = env("JMCP_TEST_HOST");
     let user = env("JMCP_TEST_USER");
     let pass = env("JMCP_TEST_PASS");
-    let json = format!(r#"{{
+    let json = format!(
+        r#"{{
         "lab":{{"ip":"{host}","username":"{user}",
                 "auth":{{"type":"password","password":"{pass}"}}}}
-    }}"#);
+    }}"#
+    );
     let mut f = tempfile::NamedTempFile::new().unwrap();
     f.write_all(json.as_bytes()).unwrap();
     let inv = Arc::new(Inventory::load(f.path()).unwrap());
@@ -41,10 +43,12 @@ async fn router_list_returns_lab() {
         let host = env("JMCP_TEST_HOST");
         let user = env("JMCP_TEST_USER");
         let pass = env("JMCP_TEST_PASS");
-        let json = format!(r#"{{
+        let json = format!(
+            r#"{{
             "lab":{{"ip":"{host}","username":"{user}",
                     "auth":{{"type":"password","password":"{pass}"}}}}
-        }}"#);
+        }}"#
+        );
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(json.as_bytes()).unwrap();
         Arc::new(Inventory::load(f.path()).unwrap())
@@ -64,7 +68,9 @@ async fn execute_show_version() {
             timeout: 30,
         },
         dm,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     assert!(v.as_str().unwrap().contains("Junos") || v.as_str().unwrap().contains("Hostname"));
 }
 
@@ -73,9 +79,13 @@ async fn execute_show_version() {
 async fn get_running_config() {
     let dm = build_dm();
     let v = get_config::handle(
-        GetConfigArgs { router_name: "lab".into() },
+        GetConfigArgs {
+            router_name: "lab".into(),
+        },
         dm,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let body = v.as_str().unwrap();
     assert!(!body.is_empty());
     assert!(body.contains("system") || body.contains("version"));
@@ -86,9 +96,14 @@ async fn get_running_config() {
 async fn diff_against_rollback_1() {
     let dm = build_dm();
     let v = config_diff::handle(
-        ConfigDiffArgs { router_name: "lab".into(), version: 1 },
+        ConfigDiffArgs {
+            router_name: "lab".into(),
+            version: 1,
+        },
         dm,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     assert!(v.is_string());
 }
 
@@ -97,9 +112,14 @@ async fn diff_against_rollback_1() {
 async fn gather_facts() {
     let dm = build_dm();
     let v = facts::handle(
-        GatherFactsArgs { router_name: "lab".into(), timeout: 30 },
+        GatherFactsArgs {
+            router_name: "lab".into(),
+            timeout: 30,
+        },
         dm,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     assert!(v.get("hostname").is_some());
     assert!(v.get("version").is_some());
 }

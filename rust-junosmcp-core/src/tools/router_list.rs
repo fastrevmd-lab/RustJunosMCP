@@ -22,10 +22,12 @@ mod tests {
 
     #[tokio::test]
     async fn returns_sorted_names() {
-        let inv = make_inv(r#"{
+        let inv = make_inv(
+            r#"{
             "z":{"ip":"1.1.1.1","username":"u","auth":{"type":"password","password":"x"}},
             "a":{"ip":"1.1.1.2","username":"u","auth":{"type":"password","password":"x"}}
-        }"#);
+        }"#,
+        );
         let v = handle(inv).await.unwrap();
         assert_eq!(v, json!(["a", "z"]));
     }

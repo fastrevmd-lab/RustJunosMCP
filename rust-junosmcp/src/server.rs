@@ -5,14 +5,12 @@
 //! the `Result<serde_json::Value, JmcpError>` into the appropriate rmcp content.
 
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{
-    CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo,
-};
+use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use rust_junosmcp_core::{
     tools::{
-        config_diff, execute_command, facts, get_config, load_commit, router_list,
-        ConfigDiffArgs, ExecuteCommandArgs, GatherFactsArgs, GetConfigArgs, LoadCommitArgs,
+        config_diff, execute_command, facts, get_config, load_commit, router_list, ConfigDiffArgs,
+        ExecuteCommandArgs, GatherFactsArgs, GetConfigArgs, LoadCommitArgs,
     },
     DeviceManager, Inventory,
 };

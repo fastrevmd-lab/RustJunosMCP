@@ -19,7 +19,11 @@ fn binary_path() -> std::path::PathBuf {
     let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.pop(); // workspace root
     p.push("target");
-    p.push(if cfg!(debug_assertions) { "debug" } else { "release" });
+    p.push(if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    });
     p.push("rust-junosmcp");
     p
 }
@@ -55,20 +59,29 @@ fn lists_six_tools() {
         stdin.flush().unwrap();
     }
 
-    send(&mut stdin, &json!({
-        "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-03-26",
-            "capabilities": {},
-            "clientInfo": { "name": "smoke", "version": "0.1" }
-        }
-    }));
-    send(&mut stdin, &json!({
-        "jsonrpc": "2.0", "method": "notifications/initialized"
-    }));
-    send(&mut stdin, &json!({
-        "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}
-    }));
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": { "name": "smoke", "version": "0.1" }
+            }
+        }),
+    );
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0", "method": "notifications/initialized"
+        }),
+    );
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}
+        }),
+    );
 
     // Read until we see the tools/list response.
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -77,21 +90,39 @@ fn lists_six_tools() {
     let mut reader = BufReader::new(&mut stdout);
     while Instant::now() < deadline && tools_response.is_none() {
         let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 { break; }
-        let v: Value = match serde_json::from_str(line.trim()) { Ok(v) => v, Err(_) => continue };
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            break;
+        }
+        let v: Value = match serde_json::from_str(line.trim()) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
         if v.get("id") == Some(&json!(2)) {
             tools_response = Some(v);
         }
     }
 
     let _ = child.kill();
+    let _ = child.wait();
     let resp = tools_response.expect("did not receive tools/list response within 15s");
-    let tools = resp.pointer("/result/tools").expect("missing /result/tools").as_array().unwrap();
-    let names: Vec<&str> = tools.iter().map(|t| t.get("name").and_then(Value::as_str).unwrap()).collect();
+    let tools = resp
+        .pointer("/result/tools")
+        .expect("missing /result/tools")
+        .as_array()
+        .unwrap();
+    let names: Vec<&str> = tools
+        .iter()
+        .map(|t| t.get("name").and_then(Value::as_str).unwrap())
+        .collect();
     for expected in EXPECTED_TOOLS {
-        assert!(names.contains(expected),
-                "missing tool {expected}; got {names:?}");
+        assert!(
+            names.contains(expected),
+            "missing tool {expected}; got {names:?}"
+        );
     }
-    assert_eq!(names.len(), EXPECTED_TOOLS.len(),
-               "extra/missing tools: got {names:?}");
+    assert_eq!(
+        names.len(),
+        EXPECTED_TOOLS.len(),
+        "extra/missing tools: got {names:?}"
+    );
 }

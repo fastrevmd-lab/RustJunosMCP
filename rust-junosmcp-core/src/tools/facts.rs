@@ -11,10 +11,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub async fn handle(
-    args: GatherFactsArgs,
-    dm: Arc<DeviceManager>,
-) -> Result<Value, JmcpError> {
+pub async fn handle(args: GatherFactsArgs, dm: Arc<DeviceManager>) -> Result<Value, JmcpError> {
     let timeout = Duration::from_secs(args.timeout);
     let mut dev = dm.open(&args.router_name).await?;
 
@@ -37,15 +34,22 @@ mod tests {
     #[tokio::test]
     async fn unknown_router_propagates_error() {
         let mut f = tempfile::NamedTempFile::new().unwrap();
-        f.write_all(br#"{
+        f.write_all(
+            br#"{
             "r1":{"ip":"127.0.0.1","username":"u","auth":{"type":"password","password":"x"}}
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
         let inv = Arc::new(Inventory::load(f.path()).unwrap());
-        let dm  = Arc::new(DeviceManager::new(inv));
+        let dm = Arc::new(DeviceManager::new(inv));
         let r = handle(
-            GatherFactsArgs { router_name: "nope".into(), timeout: 5 },
+            GatherFactsArgs {
+                router_name: "nope".into(),
+                timeout: 5,
+            },
             dm,
-        ).await;
+        )
+        .await;
         assert!(matches!(r, Err(JmcpError::UnknownRouter(_))));
     }
 }

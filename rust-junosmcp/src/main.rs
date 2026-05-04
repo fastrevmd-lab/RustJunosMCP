@@ -14,7 +14,9 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> Result<()> {
     // Logs to stderr — stdout is reserved for MCP framing on stdio transport.
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_writer(std::io::stderr)
         .init();
 
@@ -40,8 +42,13 @@ async fn main() -> Result<()> {
     let dev_manager = Arc::new(DeviceManager::new(inventory.clone()));
     let handler = JmcpHandler::new(inventory, dev_manager);
 
-    let service = handler.serve((tokio::io::stdin(), tokio::io::stdout())).await
+    let service = handler
+        .serve((tokio::io::stdin(), tokio::io::stdout()))
+        .await
         .context("starting MCP stdio service")?;
-    service.waiting().await.context("MCP service exited with error")?;
+    service
+        .waiting()
+        .await
+        .context("MCP service exited with error")?;
     Ok(())
 }
