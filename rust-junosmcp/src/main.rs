@@ -1,3 +1,5 @@
+mod cli;
+
 fn main() {
-    eprintln!("rust-junosmcp v0.1 - skeleton");
+    eprintln!("rust-junosmcp v{} - skeleton", env!("CARGO_PKG_VERSION"));
 }
