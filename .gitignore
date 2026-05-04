@@ -1,0 +1,23 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Serena MCP project metadata
+.serena/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local secrets / runtime
+devices.json
+.tokens
+*.key
+*.pem
