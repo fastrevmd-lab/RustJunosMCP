@@ -14,7 +14,7 @@ instead of PyEZ.
 - Docker image (distroless) and LXC release tarball with systemd unit.
 
 **Coming in v0.2:** PFE commands, batch execution, Jinja2 templates,
-streamable-http transport, bearer-token auth, blocklist guardrails,
+streamable-http transport, bearer-token auth,
 `add_device` / `reload_devices` interactive tools.
 
 ## Blocklist guardrails (v0.2)
