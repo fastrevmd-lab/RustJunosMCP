@@ -94,10 +94,6 @@ pub(crate) fn compile_rules(
         .collect()
 }
 
-// BlocklistRules is the return type of inv.blocklist_defaults(); not referenced
-// by name in the algorithm but included per spec for reader clarity.
-#[allow(unused_imports)]
-use crate::inventory::BlocklistRules;
 use std::collections::HashMap;
 
 /// Compiled, per-device blocklist policy. Built once at startup from the
@@ -139,14 +135,14 @@ impl Policy {
             if let Some(bl) = entry.blocklist.as_ref() {
                 let cmd_scope = format!("device '{name}'.blocklist.commands");
                 let cfg_scope = format!("device '{name}'.blocklist.config");
-                device_commands.insert(
-                    name.clone(),
-                    compile_rules(&bl.commands, &cmd_scope, RuleSource::Device)?,
-                );
-                device_config.insert(
-                    name.clone(),
-                    compile_rules(&bl.config, &cfg_scope, RuleSource::Device)?,
-                );
+                let cmds = compile_rules(&bl.commands, &cmd_scope, RuleSource::Device)?;
+                if !cmds.is_empty() {
+                    device_commands.insert(name.clone(), cmds);
+                }
+                let cfgs = compile_rules(&bl.config, &cfg_scope, RuleSource::Device)?;
+                if !cfgs.is_empty() {
+                    device_config.insert(name.clone(), cfgs);
+                }
             }
         }
 
@@ -299,6 +295,30 @@ mod tests {
         // One Defaults, one Device.
         assert!(r1_cmds.iter().any(|r| r.source == RuleSource::Defaults));
         assert!(r1_cmds.iter().any(|r| r.source == RuleSource::Device));
+    }
+
+    #[test]
+    fn empty_per_device_blocklist_does_not_inflate_rule_counts() {
+        let inv = inv_from(
+            r#"{
+                "_blocklist_defaults": {
+                    "commands": [{"action":"deny","pattern":"x"}]
+                },
+                "r1":{
+                    "ip":"1.1.1.1","username":"u",
+                    "auth":{"type":"password","password":"x"},
+                    "blocklist": {}
+                }
+            }"#,
+        );
+        let p = Policy::build(&inv).unwrap();
+        let counts = p.rule_counts();
+        assert_eq!(counts.default_commands, 1);
+        assert_eq!(counts.default_config, 0);
+        assert_eq!(
+            counts.devices_with_rules, 0,
+            "r1 has empty blocklist; should not count"
+        );
     }
 
     #[test]
