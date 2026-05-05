@@ -2038,6 +2038,7 @@ name = "rust-junosmcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "clap",
  "libc",
  "rmcp",
@@ -2047,6 +2048,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",

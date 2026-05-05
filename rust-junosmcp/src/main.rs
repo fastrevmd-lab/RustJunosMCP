@@ -1,3 +1,4 @@
+mod caller;
 mod cli;
 mod cli_validate;
 mod server;
@@ -54,7 +55,7 @@ async fn main() -> Result<()> {
     );
 
     let dev_manager = Arc::new(DeviceManager::new(inventory.clone()));
-    let handler = JmcpHandler::new(inventory, dev_manager, policy);
+    let handler = JmcpHandler::new(inventory, dev_manager, policy, None);
 
     let service = handler
         .serve((tokio::io::stdin(), tokio::io::stdout()))

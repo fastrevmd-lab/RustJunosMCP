@@ -24,6 +24,7 @@ thiserror          = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 rmcp = { version = "0.8", features = ["server", "macros", "transport-io", "schemars"] }
 schemars           = { workspace = true }
+arc-swap           = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

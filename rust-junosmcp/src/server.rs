@@ -4,9 +4,11 @@
 //! struct, calls into `rust_junosmcp_core::tools::<name>::handle`, and converts
 //! the `Result<serde_json::Value, JmcpError>` into the appropriate rmcp content.
 
+use arc_swap::ArcSwap;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
+use rust_junosmcp_auth::TokenStore;
 use rust_junosmcp_core::{
     tools::{
         config_diff, execute_command, facts, get_config, load_commit, router_list, ConfigDiffArgs,
@@ -22,11 +24,24 @@ pub struct JmcpHandler {
     inv: Arc<Inventory>,
     dm: Arc<DeviceManager>,
     policy: Arc<Policy>,
+    /// T10 will read this for scope enforcement; stdio path leaves it `None`.
+    #[allow(dead_code)]
+    token_store: Option<Arc<ArcSwap<TokenStore>>>,
 }
 
 impl JmcpHandler {
-    pub fn new(inv: Arc<Inventory>, dm: Arc<DeviceManager>, policy: Arc<Policy>) -> Self {
-        Self { inv, dm, policy }
+    pub fn new(
+        inv: Arc<Inventory>,
+        dm: Arc<DeviceManager>,
+        policy: Arc<Policy>,
+        token_store: Option<Arc<ArcSwap<TokenStore>>>,
+    ) -> Self {
+        Self {
+            inv,
+            dm,
+            policy,
+            token_store,
+        }
     }
 
     fn to_call_result(
