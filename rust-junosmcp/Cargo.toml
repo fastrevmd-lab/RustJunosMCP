@@ -7,23 +7,50 @@ repository.workspace = true
 authors.workspace    = true
 description = "MCP server for Juniper Junos devices, built on rustEZ."
 
+[features]
+default = ["tls"]
+tls = ["dep:rustls", "dep:rustls-pemfile", "dep:axum-server"]
+
 [[bin]]
 name = "rust-junosmcp"
 path = "src/main.rs"
 
 [dependencies]
 rust-junosmcp-core = { path = "../rust-junosmcp-core" }
+rust-junosmcp-auth = { path = "../rust-junosmcp-auth" }
 tokio              = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow             = { workspace = true }
+thiserror          = { workspace = true }
 clap = { version = "4", features = ["derive"] }
-rmcp = { version = "0.8", features = ["server", "macros", "transport-io", "schemars"] }
+rmcp = { version = "0.8", features = [
+    "server",
+    "macros",
+    "transport-io",
+    "schemars",
+    "transport-streamable-http-server",
+] }
 schemars           = { workspace = true }
+arc-swap           = { workspace = true }
+axum               = { workspace = true }
+tower              = { workspace = true }
+tower-http         = { workspace = true, features = ["trace"] }
+http               = { workspace = true }
+rustls             = { workspace = true, optional = true }
+rustls-pemfile     = { workspace = true, optional = true }
+axum-server        = { workspace = true, optional = true, default-features = false, features = ["tls-rustls-no-provider"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+ureq = { workspace = true, features = ["json", "tls"] }
+rcgen = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
