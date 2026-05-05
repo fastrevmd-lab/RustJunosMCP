@@ -742,6 +742,23 @@ mod tests {
     }
 
     #[test]
+    fn rejects_wildcard_mixed_into_allowlist() {
+        // "*" inside an allowlist is ambiguous (would never act as wildcard
+        // since ScopeSet::From<Vec<String>> only treats single-element ["*"]
+        // as Wildcard). Make this fatal at load to keep one canonical spelling.
+        let f = write_tmp(r#"{
+            "version":1,
+            "tokens":[{
+                "name":"a","hash":"sha256:VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV",
+                "routers":["*","r1"],"tools":["*"],
+                "created_at":"2026-05-05T00:00:00Z"
+            }]
+        }"#);
+        let err = TokenStoreFile::load(f.path(), &[]).unwrap_err();
+        assert!(matches!(err, TokenStoreError::Invalid(s) if s.contains("'*'")));
+    }
+
+    #[test]
     fn warns_but_keeps_unknown_router_name() {
         // unknown_routers: known_routers passed in is &[]; the entry references
         // "r1" which is not in that list. Load should still succeed.
@@ -814,6 +831,13 @@ impl TokenStoreFile {
         for e in &parsed.tokens {
             if let ScopeSet::Allowlist(list) = &e.tools {
                 for t in list {
+                    if t == "*" {
+                        return Err(TokenStoreError::Invalid(format!(
+                            "token '{}' tools list mixes '*' with other names — \
+                             use either [\"*\"] for wildcard or a list without '*'",
+                            e.name
+                        )));
+                    }
                     if !KNOWN_TOOLS.contains(&t.as_str()) {
                         return Err(TokenStoreError::Invalid(format!(
                             "unknown tool name '{}' in token '{}': known tools are {:?}",
@@ -823,6 +847,15 @@ impl TokenStoreFile {
                 }
             }
             if let ScopeSet::Allowlist(list) = &e.routers {
+                for r in list {
+                    if r == "*" {
+                        return Err(TokenStoreError::Invalid(format!(
+                            "token '{}' routers list mixes '*' with other names — \
+                             use either [\"*\"] for wildcard or a list without '*'",
+                            e.name
+                        )));
+                    }
+                }
                 if !known_routers.is_empty() {
                     for r in list {
                         if !known_routers.iter().any(|kr| kr == r) {
