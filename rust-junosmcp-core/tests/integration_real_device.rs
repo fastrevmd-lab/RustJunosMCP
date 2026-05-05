@@ -6,11 +6,11 @@
 //! ```
 
 use rust_junosmcp_core::{
+    policy::Policy,
     tools::{
         config_diff, execute_command, facts, get_config, router_list, ConfigDiffArgs,
         ExecuteCommandArgs, GatherFactsArgs, GetConfigArgs,
     },
-    policy::Policy,
     DeviceManager, Inventory,
 };
 use std::io::Write;

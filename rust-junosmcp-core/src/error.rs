@@ -38,8 +38,10 @@ pub enum JmcpError {
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("denied by blocklist: {tool} on '{router}' matched rule '{pattern}' \
-             (action=deny, source={rule_source}); input: {input_excerpt}")]
+    #[error(
+        "denied by blocklist: {tool} on '{router}' matched rule '{pattern}' \
+             (action=deny, source={rule_source}); input: {input_excerpt}"
+    )]
     Denied {
         tool: &'static str,
         router: String,

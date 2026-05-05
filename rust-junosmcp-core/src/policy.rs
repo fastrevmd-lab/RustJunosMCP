@@ -126,10 +126,7 @@ pub(crate) fn normalize_input(s: &str) -> String {
 }
 
 /// Pick the most-specific matching rule. Tiebreak: device > defaults.
-fn evaluate<'r, 's>(
-    rules: &'s [&'r CompiledRule],
-    candidate: &str,
-) -> Option<&'r CompiledRule> {
+fn evaluate<'r>(rules: &[&'r CompiledRule], candidate: &str) -> Option<&'r CompiledRule> {
     rules
         .iter()
         .filter(|r| r.matcher.is_match(candidate))
@@ -343,12 +340,10 @@ mod tests {
     #[test]
     fn compile_rules_errors_with_scope_on_bad_glob() {
         let r = vec![spec(Action::Deny, "[unterminated")];
-        let err = compile_rules(&r, "_blocklist_defaults.commands", RuleSource::Defaults)
-            .unwrap_err();
+        let err =
+            compile_rules(&r, "_blocklist_defaults.commands", RuleSource::Defaults).unwrap_err();
         match err {
-            JmcpError::BlocklistRuleInvalid {
-                scope, pattern, ..
-            } => {
+            JmcpError::BlocklistRuleInvalid { scope, pattern, .. } => {
                 assert_eq!(scope, "_blocklist_defaults.commands");
                 assert_eq!(pattern, "[unterminated");
             }
@@ -461,7 +456,10 @@ mod tests {
         let p = build_policy(
             r#"{"r1":{"ip":"1.1.1.1","username":"u","auth":{"type":"password","password":"x"}}}"#,
         );
-        assert!(matches!(p.check_command("r1", "show version"), Decision::Allow));
+        assert!(matches!(
+            p.check_command("r1", "show version"),
+            Decision::Allow
+        ));
     }
 
     #[test]
@@ -476,7 +474,10 @@ mod tests {
                 }
             }"#,
         );
-        assert!(matches!(p.check_command("r1", "request system reboot"), Decision::Allow));
+        assert!(matches!(
+            p.check_command("r1", "request system reboot"),
+            Decision::Allow
+        ));
     }
 
     #[test]
@@ -491,7 +492,10 @@ mod tests {
                 }
             }"#,
         );
-        assert!(matches!(p.check_command("r1", "request system reboot"), Decision::Allow));
+        assert!(matches!(
+            p.check_command("r1", "request system reboot"),
+            Decision::Allow
+        ));
         assert!(matches!(
             p.check_command("r1", "request system halt"),
             Decision::Deny { .. }
@@ -521,7 +525,11 @@ mod tests {
             }"#,
         );
         match p.check_command("r1", "request system reboot") {
-            Decision::Deny { rule, source, line_number } => {
+            Decision::Deny {
+                rule,
+                source,
+                line_number,
+            } => {
                 assert_eq!(rule.pattern, "request system *");
                 assert_eq!(source, RuleSource::Defaults);
                 assert!(line_number.is_none());
@@ -564,9 +572,12 @@ mod tests {
                 "r1":{"ip":"1.1.1.1","username":"u","auth":{"type":"password","password":"x"}}
             }"#,
         );
-        let payload = "set interfaces ge-0/0/0 description ok\ndelete protocols bgp\nset system host-name r1";
+        let payload =
+            "set interfaces ge-0/0/0 description ok\ndelete protocols bgp\nset system host-name r1";
         match p.check_config("r1", "set", payload).unwrap() {
-            Decision::Deny { line_number, rule, .. } => {
+            Decision::Deny {
+                line_number, rule, ..
+            } => {
                 assert_eq!(line_number, Some(2));
                 assert_eq!(rule.pattern, "delete *");
             }

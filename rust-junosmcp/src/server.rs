@@ -109,9 +109,7 @@ impl JmcpHandler {
         &self,
         Parameters(args): Parameters<LoadCommitArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        Self::to_call_result(
-            load_commit::handle(args, self.dm.clone(), self.policy.clone()).await,
-        )
+        Self::to_call_result(load_commit::handle(args, self.dm.clone(), self.policy.clone()).await)
     }
 }
 

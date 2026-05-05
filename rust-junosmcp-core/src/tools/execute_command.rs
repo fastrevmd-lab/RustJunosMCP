@@ -119,7 +119,12 @@ mod tests {
         )
         .await;
         match r {
-            Err(JmcpError::Denied { tool, router, pattern, .. }) => {
+            Err(JmcpError::Denied {
+                tool,
+                router,
+                pattern,
+                ..
+            }) => {
                 assert_eq!(tool, "execute_junos_command");
                 assert_eq!(router, "r1");
                 assert_eq!(pattern, "request system *");

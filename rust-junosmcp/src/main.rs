@@ -38,9 +38,7 @@ async fn main() -> Result<()> {
         "loaded inventory"
     );
 
-    let policy = Arc::new(
-        Policy::build(&inventory).context("compiling blocklist policy")?,
-    );
+    let policy = Arc::new(Policy::build(&inventory).context("compiling blocklist policy")?);
     let counts = policy.rule_counts();
     tracing::info!(
         default_command_rules = counts.default_commands,
