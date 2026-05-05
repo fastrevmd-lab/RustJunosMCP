@@ -32,6 +32,7 @@ chrono           = { version = "0.4", default-features = false, features = ["ser
 axum             = "0.8"
 tower            = "0.5"
 tower-http       = "0.6"
+http             = "1"
 rustls           = "0.23"
 tokio-rustls     = "0.26"
 rustls-pemfile   = "2"

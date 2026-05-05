@@ -22,12 +22,23 @@ use serde_json::Value;
 use std::sync::Arc;
 
 /// Look up the per-request `CallerCtx` (inserted by the auth middleware on
-/// the streamable-http path). Returns `None` under stdio. The middleware
-/// inserts `CallerCtx` directly into the rmcp request-context extensions; on
-/// the streamable-http path rmcp also exposes the original `http::request::Parts`
-/// in the same extension map, but we only need `CallerCtx` here.
+/// the streamable-http path). Returns `None` under stdio.
+///
+/// Mechanism: rmcp 0.8.5's `StreamableHttpService` splits the incoming axum
+/// request into `(Parts, Body)` and inserts the whole `http::request::Parts`
+/// into the per-rmcp-request `Extensions` map. It does NOT propagate
+/// individual extension types from `parts.extensions` into rmcp's `Extensions`.
+/// So to reach the `CallerCtx` our outer middleware put on `req.extensions_mut()`
+/// we have to walk through `Parts.extensions`.
+///
+/// - **stdio:** no `Parts` is inserted (no HTTP frame) → returns `None` →
+///   scope checks become a no-op (preserves original behavior).
+/// - **streamable-http:** rmcp inserted `Parts`; auth middleware put `CallerCtx`
+///   into `req.extensions` which became `parts.extensions` → returns `Some(&ctx)`.
 fn caller_ctx(extensions: &Extensions) -> Option<&crate::caller::CallerCtx> {
-    extensions.get::<crate::caller::CallerCtx>()
+    extensions
+        .get::<http::request::Parts>()
+        .and_then(|parts| parts.extensions.get::<crate::caller::CallerCtx>())
 }
 
 #[derive(Debug, thiserror::Error)]

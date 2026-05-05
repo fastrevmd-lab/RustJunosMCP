@@ -1,13 +1,16 @@
+mod auth_layer;
 mod caller;
 mod cli;
 mod cli_validate;
+mod http_transport;
 mod server;
 mod token_cmd;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::Parser;
 use cli::{Cli, Command, Transport};
 use rmcp::ServiceExt;
+use rust_junosmcp_auth::file::TokenStoreFile;
 use rust_junosmcp_core::{DeviceManager, Inventory, Policy};
 use server::JmcpHandler;
 use std::sync::Arc;
@@ -30,10 +33,6 @@ async fn main() -> Result<()> {
 
     cli_validate::validate(&args).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    if matches!(args.transport, Transport::StreamableHttp) {
-        bail!("streamable-http transport implementation lands in Task 11");
-    }
-
     let inventory = Arc::new(
         Inventory::load(&args.device_mapping)
             .with_context(|| format!("loading {}", args.device_mapping.display()))?,
@@ -55,15 +54,53 @@ async fn main() -> Result<()> {
     );
 
     let dev_manager = Arc::new(DeviceManager::new(inventory.clone()));
-    let handler = JmcpHandler::new(inventory, dev_manager, policy, None);
 
-    let service = handler
-        .serve((tokio::io::stdin(), tokio::io::stdout()))
-        .await
-        .context("starting MCP stdio service")?;
-    service
-        .waiting()
-        .await
-        .context("MCP service exited with error")?;
+    // Build the token store (or None for --allow-no-auth / stdio).
+    let token_store = match (&args.tokens_file, args.allow_no_auth) {
+        (Some(path), _) => {
+            let names = inventory.names();
+            let known: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+            let store = TokenStoreFile::load(path, &known)
+                .with_context(|| format!("loading {}", path.display()))?;
+            tracing::info!(tokens = store.len(), "token store loaded");
+            Some(Arc::new(arc_swap::ArcSwap::from_pointee(store)))
+        }
+        (None, true) => {
+            tracing::warn!(
+                "--allow-no-auth: streamable-http will accept unauthenticated requests"
+            );
+            None
+        }
+        (None, false) if matches!(args.transport, Transport::StreamableHttp) => {
+            unreachable!("cli_validate::validate should have refused this combination");
+        }
+        _ => None,
+    };
+
+    let handler = JmcpHandler::new(
+        inventory.clone(),
+        dev_manager,
+        policy,
+        token_store.clone(),
+    );
+
+    match args.transport {
+        Transport::Stdio => {
+            let service = handler
+                .serve((tokio::io::stdin(), tokio::io::stdout()))
+                .await
+                .context("starting MCP stdio service")?;
+            service
+                .waiting()
+                .await
+                .context("MCP service exited with error")?;
+        }
+        Transport::StreamableHttp => {
+            let addr: std::net::SocketAddr = format!("{}:{}", args.host, args.port)
+                .parse()
+                .with_context(|| format!("parsing {}:{}", args.host, args.port))?;
+            http_transport::serve(handler, addr, token_store).await?;
+        }
+    }
     Ok(())
 }
