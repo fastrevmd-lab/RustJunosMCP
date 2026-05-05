@@ -8,6 +8,8 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "get_router_list",
     "gather_device_facts",
     "execute_junos_command",
+    "execute_junos_pfe_command",
+    "execute_junos_command_batch",
     "get_junos_config",
     "junos_config_diff",
     "load_and_commit_config",
@@ -510,5 +512,30 @@ mod tests {
             Err(e) => e,
         };
         assert!(matches!(err, TokenStoreError::Invalid(s) if s.contains("ghost")));
+    }
+
+    #[test]
+    fn known_tools_includes_pfe_and_batch() {
+        assert!(KNOWN_TOOLS.contains(&"execute_junos_pfe_command"));
+        assert!(KNOWN_TOOLS.contains(&"execute_junos_command_batch"));
+    }
+
+    #[test]
+    fn add_accepts_new_tool_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokens.json");
+        TokenStoreFile::save(&path, &TokenStore::new(vec![])).unwrap();
+        let _ = TokenStoreFile::add(
+            &path,
+            "ops",
+            ScopeSet::Wildcard,
+            ScopeSet::Allowlist(vec![
+                "execute_junos_pfe_command".into(),
+                "execute_junos_command_batch".into(),
+            ]),
+        )
+        .unwrap();
+        let store = TokenStoreFile::load(&path, &[]).unwrap();
+        assert_eq!(store.len(), 1);
     }
 }
