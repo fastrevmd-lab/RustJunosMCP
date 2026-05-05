@@ -1,4 +1,5 @@
 mod cli;
+mod cli_validate;
 mod server;
 mod token_cmd;
 
@@ -26,11 +27,10 @@ async fn main() -> Result<()> {
         return token_cmd::run(action);
     }
 
+    cli_validate::validate(&args).map_err(|e| anyhow::anyhow!("{}", e))?;
+
     if matches!(args.transport, Transport::StreamableHttp) {
-        bail!(
-            "streamable-http transport is not supported in v0.1. \
-             Use --transport stdio. HTTP support is planned for v0.2."
-        );
+        bail!("streamable-http transport implementation lands in Task 11");
     }
 
     let inventory = Arc::new(
