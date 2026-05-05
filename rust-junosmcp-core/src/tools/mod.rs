@@ -4,11 +4,13 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+pub mod batch;
 pub mod config_diff;
 pub mod execute_command;
 pub mod facts;
 pub mod get_config;
 pub mod load_commit;
+pub mod pfe;
 pub mod router_list;
 
 fn default_timeout() -> u64 {
@@ -22,6 +24,9 @@ fn default_set_format() -> String {
 }
 fn default_commit_comment() -> String {
     "Configuration loaded via MCP".into()
+}
+fn default_max_concurrent_routers() -> u32 {
+    16
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Default)]
@@ -72,6 +77,36 @@ pub struct LoadCommitArgs {
     pub commit_comment: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExecutePfeArgs {
+    /// The name of the router.
+    pub router_name: String,
+    /// FPC target, e.g. `fpc0`.
+    pub fpc_target: String,
+    /// PFE command to execute (no surrounding quotes).
+    pub pfe_command: String,
+    /// Per-command timeout in seconds.
+    #[serde(default = "default_timeout")]
+    pub timeout: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExecuteBatchArgs {
+    /// Routers to execute against. Must be non-empty.
+    pub routers: Vec<String>,
+    /// Operational CLI commands to run sequentially per router. Must be non-empty.
+    pub commands: Vec<String>,
+    /// Per-command timeout in seconds.
+    #[serde(default = "default_timeout")]
+    pub command_timeout: u64,
+    /// Optional whole-batch wall-clock ceiling in seconds.
+    #[serde(default)]
+    pub batch_timeout: Option<u64>,
+    /// Maximum number of routers in flight concurrently.
+    #[serde(default = "default_max_concurrent_routers")]
+    pub max_concurrent_routers: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,5 +138,40 @@ mod tests {
         let v = serde_json::json!({"router_name":"r1"});
         let r: Result<ExecuteCommandArgs, _> = serde_json::from_value(v);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn execute_pfe_defaults_timeout() {
+        let v = serde_json::json!({"router_name":"r1","fpc_target":"fpc0","pfe_command":"show jnh 0 stats"});
+        let a: ExecutePfeArgs = serde_json::from_value(v).unwrap();
+        assert_eq!(a.timeout, 360);
+        assert_eq!(a.fpc_target, "fpc0");
+    }
+
+    #[test]
+    fn execute_pfe_rejects_missing_fpc_target() {
+        let v = serde_json::json!({"router_name":"r1","pfe_command":"show jnh 0 stats"});
+        let r: Result<ExecutePfeArgs, _> = serde_json::from_value(v);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn execute_batch_defaults_concurrency_and_command_timeout() {
+        let v = serde_json::json!({"routers":["r1","r2"],"commands":["show version"]});
+        let a: ExecuteBatchArgs = serde_json::from_value(v).unwrap();
+        assert_eq!(a.command_timeout, 360);
+        assert_eq!(a.max_concurrent_routers, 16);
+        assert!(a.batch_timeout.is_none());
+    }
+
+    #[test]
+    fn execute_batch_accepts_explicit_batch_timeout() {
+        let v = serde_json::json!({
+            "routers":["r1"],"commands":["show version"],
+            "batch_timeout":600,"max_concurrent_routers":4
+        });
+        let a: ExecuteBatchArgs = serde_json::from_value(v).unwrap();
+        assert_eq!(a.batch_timeout, Some(600));
+        assert_eq!(a.max_concurrent_routers, 4);
     }
 }
