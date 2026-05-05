@@ -7,6 +7,10 @@ repository.workspace = true
 authors.workspace    = true
 description = "MCP server for Juniper Junos devices, built on rustEZ."
 
+[features]
+default = ["tls"]
+tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:axum-server"]
+
 [[bin]]
 name = "rust-junosmcp"
 path = "src/main.rs"
@@ -35,12 +39,19 @@ axum               = { workspace = true }
 tower              = { workspace = true }
 tower-http         = { workspace = true, features = ["trace"] }
 http               = { workspace = true }
+rustls             = { workspace = true, optional = true }
+tokio-rustls       = { workspace = true, optional = true }
+rustls-pemfile     = { workspace = true, optional = true }
+axum-server        = { workspace = true, optional = true, default-features = false, features = ["tls-rustls-no-provider"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "2", features = ["json", "tls"] }
+rcgen = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }

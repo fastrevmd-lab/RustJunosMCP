@@ -224,11 +224,7 @@ fn sighup_reloads_token_store() {
         ])
         .output()
         .unwrap();
-    assert!(
-        revoke.status.success(),
-        "token revoke failed: {:?}",
-        revoke
-    );
+    assert!(revoke.status.success(), "token revoke failed: {:?}", revoke);
 
     // SIGHUP the server to trigger reload.
     let pid = s.child.id() as i32;

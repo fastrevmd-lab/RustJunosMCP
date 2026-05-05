@@ -24,6 +24,7 @@ pub async fn serve(
     handler: JmcpHandler,
     addr: SocketAddr,
     token_store: Option<Arc<ArcSwap<TokenStore>>>,
+    #[cfg(feature = "tls")] tls: Option<Arc<rustls::ServerConfig>>,
 ) -> Result<()> {
     // Factory closure: rmcp wants a fresh handler per session. JmcpHandler
     // is cheap to clone (Arc fields) so we just clone it.
@@ -46,6 +47,16 @@ pub async fn serve(
         // --allow-no-auth path: no middleware, no token check.
         rmcp_router
     };
+
+    #[cfg(feature = "tls")]
+    if let Some(cfg) = tls {
+        let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(cfg);
+        tracing::info!(addr = %addr, "streamable-http listening (TLS)");
+        return axum_server::bind_rustls(addr, rustls_cfg)
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+            .context("axum_server::bind_rustls");
+    }
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await

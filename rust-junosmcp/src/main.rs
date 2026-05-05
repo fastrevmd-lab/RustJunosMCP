@@ -4,6 +4,8 @@ mod cli;
 mod cli_validate;
 mod http_transport;
 mod server;
+#[cfg(feature = "tls")]
+mod tls;
 mod token_cmd;
 
 use anyhow::{Context, Result};
@@ -126,7 +128,30 @@ async fn main() -> Result<()> {
             let addr: std::net::SocketAddr = format!("{}:{}", args.host, args.port)
                 .parse()
                 .with_context(|| format!("parsing {}:{}", args.host, args.port))?;
-            http_transport::serve(handler, addr, token_store).await?;
+
+            #[cfg(feature = "tls")]
+            let tls_cfg = match (&args.tls_cert, &args.tls_key) {
+                (Some(cert), Some(key)) => {
+                    Some(tls::load(cert, key).context("loading TLS cert/key")?)
+                }
+                _ => None,
+            };
+
+            #[cfg(not(feature = "tls"))]
+            if args.tls_cert.is_some() || args.tls_key.is_some() {
+                anyhow::bail!(
+                    "rust-junosmcp built without the 'tls' feature; cannot honor --tls-cert/--tls-key"
+                );
+            }
+
+            http_transport::serve(
+                handler,
+                addr,
+                token_store,
+                #[cfg(feature = "tls")]
+                tls_cfg,
+            )
+            .await?;
         }
     }
     Ok(())
