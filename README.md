@@ -12,9 +12,10 @@ instead of PyEZ.
 - stdio transport only.
 - `devices.json` drop-in compatible (`auth.type` ∈ {`password`, `ssh_key`}).
 - Docker image (distroless) and LXC release tarball with systemd unit.
+- streamable-http transport (with optional rustls TLS).
+- bearer-token auth with per-token router/tool scopes.
 
 **Coming in v0.2:** PFE commands, batch execution, Jinja2 templates,
-streamable-http transport, bearer-token auth,
 `add_device` / `reload_devices` interactive tools.
 
 ## Blocklist guardrails (v0.2)
@@ -111,24 +112,120 @@ pct exec 115 -- systemctl enable --now rust-junosmcp
 > For v0.1, the practical pattern is invoking the binary on demand from an
 > MCP client running outside the LXC.
 
+## Remote transport + auth (v0.2)
+
+### Mint a token
+
+```bash
+cargo run -- token add \
+  --tokens-file tokens.json \
+  --name ops \
+  --routers '*' \
+  --tools execute_junos_command,gather_device_facts
+```
+
+> **Note:** See [`tokens-template.json`](tokens-template.json) for the file
+> shape. Use `token add` rather than editing the file by hand — the hash field
+> must be a SHA-256 of the secret, not the plaintext.
+
+### Run with auth (streamable-http)
+
+```bash
+cargo run -- \
+  --device-mapping devices.json \
+  --transport streamable-http \
+  -H 127.0.0.1 \
+  -p 8765 \
+  --tokens-file tokens.json
+```
+
+### Loopback escape hatch (no auth, local only)
+
+```bash
+cargo run -- --device-mapping devices.json --transport streamable-http \
+  -H 127.0.0.1 -p 8765 --allow-no-auth
+```
+
+`--allow-no-auth` is refused if the bind address is not loopback.
+
+### Non-loopback requires TLS
+
+```bash
+cargo run -- \
+  --device-mapping devices.json \
+  --transport streamable-http \
+  -H 0.0.0.0 \
+  -p 8765 \
+  --tokens-file tokens.json \
+  --tls-cert cert.pem \
+  --tls-key key.pem
+```
+
+To bind off-loopback over plain HTTP (e.g., behind a TLS-terminating proxy on
+the same host), add `--allow-insecure-bind`. This flag overrides the TLS
+requirement and should be used with care — only when you have an external
+guarantee of transport security.
+
+### Hot reload
+
+After revoking or rotating a token, send `SIGHUP` to the running server to
+reload the token store without restarting:
+
+```bash
+# Revoke.
+cargo run -- token revoke --tokens-file tokens.json --name ops
+
+# Rotate (mints a new secret, preserves scopes).
+cargo run -- token rotate --tokens-file tokens.json --name ops
+
+# Trigger hot reload.
+kill -HUP <pid>
+```
+
+### Refusal matrix
+
+| Flags | Bind address | Result |
+|---|---|---|
+| _(none)_ | any | Refused — `--tokens-file` or `--allow-no-auth` required for streamable-http |
+| `--allow-no-auth` only | non-loopback | Refused — `--allow-no-auth` is loopback-only |
+| `--tokens-file` only | non-loopback, no TLS | Refused — add `--tls-cert`/`--tls-key` or `--allow-insecure-bind` |
+| `--tokens-file --tls-cert cert.pem --tls-key key.pem` | any | OK |
+
 ## CLI
 
 ```
-rust-junosmcp 0.1.0
 Junos MCP server (Rust)
 
-Usage: rust-junosmcp [OPTIONS]
+Usage: rust-junosmcp [OPTIONS] [COMMAND]
+
+Commands:
+  token  Manage the bearer-token store
+  help   Print this message or the help of the given subcommand(s)
 
 Options:
-  -f, --device-mapping <DEVICE_MAPPING>  [default: devices.json]
-  -t, --transport <TRANSPORT>            [default: stdio] [possible values: stdio, streamable-http]
-  -H, --host <HOST>                      [default: 127.0.0.1]
-  -p, --port <PORT>                      [default: 30030]
-  -h, --help                             Print help
-  -V, --version                          Print version
+  -f, --device-mapping <DEVICE_MAPPING>
+          JSON file with device mapping (Juniper junos-mcp-server compatible) [default: devices.json]
+  -t, --transport <TRANSPORT>
+          Transport [default: stdio] [possible values: stdio, streamable-http]
+  -H, --host <HOST>
+          Bind host (streamable-http only) [default: 127.0.0.1]
+  -p, --port <PORT>
+          Bind port (streamable-http only) [default: 30030]
+      --tokens-file <TOKENS_FILE>
+          Bearer-token file. Required for streamable-http unless --allow-no-auth
+      --tls-cert <TLS_CERT>
+          PEM-encoded TLS cert (streamable-http only). Pair with --tls-key
+      --tls-key <TLS_KEY>
+          PEM-encoded TLS key (streamable-http only). Pair with --tls-cert
+      --allow-no-auth
+          Disable bearer-token auth. Refuses to bind off-loopback
+      --allow-insecure-bind
+          Bind off-loopback over plain HTTP. Required for non-127.0.0.1 hosts when TLS is not configured
+  -h, --help
+          Print help
+  -V, --version
+          Print version
 ```
-
-`--transport streamable-http` is parsed but rejected at runtime in v0.1.
 
 ## Testing against a real device
 
