@@ -246,6 +246,43 @@ impl Policy {
         }
     }
 
+    /// Decide whether `config_text` is allowed on `router` for the given
+    /// `config_format`. Returns `Err` if `config_format != "set"` and the
+    /// device has any effective config rules.
+    pub fn check_config<'a>(
+        &'a self,
+        router: &str,
+        config_format: &str,
+        config_text: &str,
+    ) -> Result<Decision<'a>, JmcpError> {
+        let rules = self.config_rules_for(router);
+        if rules.is_empty() {
+            return Ok(Decision::Allow);
+        }
+        if config_format != "set" {
+            return Err(JmcpError::ConfigFormatNotAllowedWithRules {
+                format: config_format.to_string(),
+            });
+        }
+
+        for (idx, raw_line) in config_text.lines().enumerate() {
+            let line = normalize_input(raw_line);
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(rule) = evaluate(&rules, &line) {
+                if rule.action == Action::Deny {
+                    return Ok(Decision::Deny {
+                        rule,
+                        source: rule.source,
+                        line_number: Some(idx + 1),
+                    });
+                }
+            }
+        }
+        Ok(Decision::Allow)
+    }
+
     /// Counts for the startup info log.
     pub fn rule_counts(&self) -> PolicyCounts {
         let devices_with_rules = self
@@ -491,5 +528,79 @@ mod tests {
             }
             other => panic!("expected Deny, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn config_no_rules_allows_any_format() {
+        let p = build_policy(
+            r#"{"r1":{"ip":"1.1.1.1","username":"u","auth":{"type":"password","password":"x"}}}"#,
+        );
+        let r = p.check_config("r1", "xml", "<configuration/>").unwrap();
+        assert!(matches!(r, Decision::Allow));
+    }
+
+    #[test]
+    fn config_non_set_format_with_rules_present_errors() {
+        let p = build_policy(
+            r#"{
+                "_blocklist_defaults": {"config":[{"action":"deny","pattern":"delete *"}]},
+                "r1":{"ip":"1.1.1.1","username":"u","auth":{"type":"password","password":"x"}}
+            }"#,
+        );
+        let err = p.check_config("r1", "xml", "<x/>").unwrap_err();
+        match err {
+            JmcpError::ConfigFormatNotAllowedWithRules { format } => {
+                assert_eq!(format, "xml");
+            }
+            other => panic!("expected ConfigFormatNotAllowedWithRules, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_per_line_match_rejects_first_offending_line() {
+        let p = build_policy(
+            r#"{
+                "_blocklist_defaults": {"config":[{"action":"deny","pattern":"delete *"}]},
+                "r1":{"ip":"1.1.1.1","username":"u","auth":{"type":"password","password":"x"}}
+            }"#,
+        );
+        let payload = "set interfaces ge-0/0/0 description ok\ndelete protocols bgp\nset system host-name r1";
+        match p.check_config("r1", "set", payload).unwrap() {
+            Decision::Deny { line_number, rule, .. } => {
+                assert_eq!(line_number, Some(2));
+                assert_eq!(rule.pattern, "delete *");
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_comment_lines_are_skipped() {
+        let p = build_policy(
+            r#"{
+                "_blocklist_defaults": {"config":[{"action":"deny","pattern":"delete *"}]},
+                "r1":{"ip":"1.1.1.1","username":"u","auth":{"type":"password","password":"x"}}
+            }"#,
+        );
+        let payload = "# delete this is just a comment\nset system host-name r1";
+        let r = p.check_config("r1", "set", payload).unwrap();
+        assert!(matches!(r, Decision::Allow));
+    }
+
+    #[test]
+    fn config_per_line_allow_carve_out_works() {
+        let p = build_policy(
+            r#"{
+                "_blocklist_defaults": {"config":[{"action":"deny","pattern":"delete *"}]},
+                "r1":{
+                    "ip":"1.1.1.1","username":"u",
+                    "auth":{"type":"password","password":"x"},
+                    "blocklist": {"config":[{"action":"allow","pattern":"delete interfaces ge-0/0/0"}]}
+                }
+            }"#,
+        );
+        let payload = "delete interfaces ge-0/0/0\nset interfaces ge-0/0/0 description new";
+        let r = p.check_config("r1", "set", payload).unwrap();
+        assert!(matches!(r, Decision::Allow));
     }
 }
