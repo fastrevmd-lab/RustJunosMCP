@@ -9,7 +9,6 @@ use serde_json::Value;
 
 /// Parse `vars_content` as JSON if first non-whitespace char is `{`,
 /// otherwise as YAML. Both branches must produce a `Value::Object`.
-#[allow(dead_code)]
 pub(crate) fn parse_vars(input: &str) -> Result<Value, JmcpError> {
     let trimmed = input.trim_start();
     let parsed = if trimmed.starts_with('{') {
@@ -29,7 +28,6 @@ pub(crate) fn parse_vars(input: &str) -> Result<Value, JmcpError> {
 
 /// Render `template_content` with `vars` (a JSON object). Strict-undefined:
 /// missing variables surface as `JmcpError::TemplateRender`, not silently as "".
-#[allow(dead_code)]
 pub(crate) fn render(template_content: &str, vars: &Value) -> Result<String, JmcpError> {
     let mut env = Environment::new();
     env.set_undefined_behavior(UndefinedBehavior::Strict);
@@ -43,7 +41,6 @@ pub(crate) fn render(template_content: &str, vars: &Value) -> Result<String, Jmc
 /// Auto-detect Junos config format from the rendered string.
 /// Returns "xml" if the first non-whitespace char is `<`, "set" if any line
 /// starts with `set ` or `delete `, otherwise "text".
-#[allow(dead_code)]
 pub(crate) fn detect_format(rendered: &str) -> &'static str {
     let trimmed = rendered.trim_start();
     if trimmed.starts_with('<') {
@@ -56,6 +53,76 @@ pub(crate) fn detect_format(rendered: &str) -> &'static str {
         }
     }
     "text"
+}
+
+use crate::device_manager::DeviceManager;
+use crate::policy::Policy;
+use crate::tools::TemplateArgs;
+use serde_json::json;
+use std::sync::Arc;
+
+/// Resolve the router-selector args to a single canonical Vec<String>.
+/// Rejects both-supplied; rejects empty `router_names`; allows neither
+/// (returns an empty list — apply path will be a no-op).
+fn resolve_routers(args: &TemplateArgs) -> Result<Vec<String>, JmcpError> {
+    match (&args.router_name, &args.router_names) {
+        (Some(_), Some(_)) => Err(JmcpError::Validation(
+            "specify exactly one of `router_name` or `router_names`".into(),
+        )),
+        (Some(one), None) => Ok(vec![one.clone()]),
+        (None, Some(many)) if many.is_empty() => Err(JmcpError::Validation(
+            "`router_names` cannot be empty".into(),
+        )),
+        (None, Some(many)) => Ok(many.clone()),
+        (None, None) => Ok(Vec::new()),
+    }
+}
+
+pub async fn handle(
+    args: TemplateArgs,
+    dm: Arc<DeviceManager>,
+    policy: Arc<Policy>,
+) -> Result<serde_json::Value, JmcpError> {
+    let routers = resolve_routers(&args)?;
+
+    // Pre-flight: verify every named router exists. Mirrors the batch tool.
+    for r in &routers {
+        let _ = dm.inventory().get(r)?;
+    }
+
+    let vars = parse_vars(&args.vars_content)?;
+    let rendered = render(&args.template_content, &vars)?;
+    let format = match args.config_format.as_deref() {
+        Some(f) if f == "set" || f == "text" || f == "xml" => f.to_string(),
+        Some(other) => return Err(JmcpError::BadFormat(other.to_string())),
+        None => detect_format(&rendered).to_string(),
+    };
+
+    if !args.apply_config {
+        let mut rows = Vec::with_capacity(routers.len().max(1));
+        if routers.is_empty() {
+            rows.push(json!({
+                "router": null,
+                "rendered_template": rendered,
+                "config_format": format,
+            }));
+        } else {
+            for r in routers {
+                rows.push(json!({
+                    "router": r,
+                    "rendered_template": rendered,
+                    "config_format": format,
+                }));
+            }
+        }
+        return Ok(json!({ "results": rows, "applied": false }));
+    }
+
+    // Apply path lands in Task 8; until then, refuse.
+    let _ = &policy;
+    Err(JmcpError::Validation(
+        "apply_config=true is not yet wired (see Task 8)".into(),
+    ))
 }
 
 #[cfg(test)]
@@ -157,5 +224,71 @@ mod tests {
     fn format_autodetect_text_otherwise() {
         assert_eq!(detect_format("system {\n  host-name r1;\n}"), "text");
         assert_eq!(detect_format(""), "text");
+    }
+
+    use crate::device_manager::DeviceManager;
+    use crate::inventory::Inventory;
+    use crate::policy::Policy;
+    use crate::tools::TemplateArgs;
+    use std::io::Write;
+    use std::sync::Arc;
+
+    fn inv_with(json: &str) -> Arc<Inventory> {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(json.as_bytes()).unwrap();
+        Arc::new(Inventory::load(f.path()).unwrap())
+    }
+
+    fn args_render_only(routers: Vec<&str>) -> TemplateArgs {
+        TemplateArgs {
+            template_content: "set system host-name {{ name }}".into(),
+            vars_content: r#"{"name":"r1"}"#.into(),
+            router_name: None,
+            router_names: Some(routers.iter().map(|s| s.to_string()).collect()),
+            apply_config: false,
+            commit_comment: "test".into(),
+            dry_run: false,
+            config_format: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn render_only_returns_rendered_string_per_router() {
+        let inv = inv_with(
+            r#"{"r1":{"ip":"127.0.0.1","username":"u","auth":{"type":"password","password":"x"}}}"#,
+        );
+        let dm = Arc::new(DeviceManager::new(inv.clone()));
+        let pol = Arc::new(Policy::build(&inv).unwrap());
+        let r = handle(args_render_only(vec!["r1"]), dm, pol).await.unwrap();
+        let rows = r["results"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["router"], "r1");
+        assert_eq!(rows[0]["rendered_template"], "set system host-name r1");
+        assert!(rows[0].get("commit_id").is_none());
+        assert!(rows[0].get("error").is_none());
+    }
+
+    #[tokio::test]
+    async fn render_only_unknown_router_returns_error_row() {
+        let inv = inv_with(
+            r#"{"r1":{"ip":"127.0.0.1","username":"u","auth":{"type":"password","password":"x"}}}"#,
+        );
+        let dm = Arc::new(DeviceManager::new(inv.clone()));
+        let pol = Arc::new(Policy::build(&inv).unwrap());
+        let r = handle(args_render_only(vec!["nope"]), dm, pol).await;
+        assert!(matches!(r, Err(JmcpError::UnknownRouter(_))));
+    }
+
+    #[tokio::test]
+    async fn render_only_rejects_both_router_name_and_names() {
+        let inv = inv_with(
+            r#"{"r1":{"ip":"127.0.0.1","username":"u","auth":{"type":"password","password":"x"}}}"#,
+        );
+        let dm = Arc::new(DeviceManager::new(inv.clone()));
+        let pol = Arc::new(Policy::build(&inv).unwrap());
+        let mut a = args_render_only(vec!["r1"]);
+        a.router_name = Some("r1".into());
+        let r = handle(a, dm, pol).await;
+        assert!(matches!(r, Err(JmcpError::Validation(_))));
     }
 }

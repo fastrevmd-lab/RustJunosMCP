@@ -83,6 +83,9 @@ pub enum JmcpError {
     /// active config blocklist rules. Same restriction as load_and_commit_config.
     #[error("template format `{format}` not allowed: device has config rules; use `set`")]
     TemplateFormatMismatch { format: String },
+
+    #[error("validation error: {0}")]
+    Validation(String),
 }
 
 impl From<rustez::RustEzError> for JmcpError {
