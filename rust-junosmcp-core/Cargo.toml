@@ -10,7 +10,7 @@ description = "Core logic and Junos tool handlers for rust-junosmcp."
 [dependencies]
 tokio        = { workspace = true }
 serde        = { workspace = true }
-serde_json   = { workspace = true }
+serde_json   = { workspace = true, features = ["preserve_order"] }
 thiserror    = { workspace = true }
 tracing      = { workspace = true }
 schemars     = { workspace = true }
