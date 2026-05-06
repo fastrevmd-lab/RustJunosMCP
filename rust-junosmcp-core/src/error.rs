@@ -23,6 +23,9 @@ pub enum JmcpError {
     #[error("invalid config_format '{0}' (expected set, text, or xml)")]
     BadFormat(String),
 
+    #[error("invalid pfe_command: {0}")]
+    BadPfeCommand(String),
+
     #[error("rollback version {0} out of range (1..=49)")]
     BadRollbackVersion(i64),
 
@@ -147,5 +150,13 @@ mod tests {
         let s = e.to_string();
         assert!(s.contains("_blocklist_defaults.commands"));
         assert!(s.contains("[unterminated"));
+    }
+
+    #[test]
+    fn bad_pfe_command_displays_reason() {
+        let e = JmcpError::BadPfeCommand("contains literal quote".into());
+        let s = e.to_string();
+        assert!(s.contains("invalid pfe_command"));
+        assert!(s.contains("contains literal quote"));
     }
 }
