@@ -12,6 +12,7 @@ pub mod get_config;
 pub mod load_commit;
 pub mod pfe;
 pub mod router_list;
+pub mod template;
 
 fn default_timeout() -> u64 {
     360
@@ -107,6 +108,33 @@ pub struct ExecuteBatchArgs {
     pub max_concurrent_routers: u32,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TemplateArgs {
+    /// Jinja2 template content as a string (inline; no file path).
+    pub template_content: String,
+    /// Vars as a JSON or YAML string. Sniffed by first non-whitespace char.
+    /// Must deserialize to a top-level object/map.
+    pub vars_content: String,
+    /// Single router to apply to. Mutually exclusive with `router_names`.
+    #[serde(default)]
+    pub router_name: Option<String>,
+    /// Multiple routers to apply to. Mutually exclusive with `router_name`.
+    #[serde(default)]
+    pub router_names: Option<Vec<String>>,
+    /// If false (default), only renders and returns the rendered string.
+    #[serde(default)]
+    pub apply_config: bool,
+    /// Commit comment recorded in the device commit log when applied.
+    #[serde(default = "default_commit_comment")]
+    pub commit_comment: String,
+    /// If true, runs lock + load + diff + rollback (no commit). Implies apply_config=true.
+    #[serde(default)]
+    pub dry_run: bool,
+    /// Override format detection ('set', 'text', 'xml'). Auto-detected if omitted.
+    #[serde(default)]
+    pub config_format: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,5 +201,34 @@ mod tests {
         let a: ExecuteBatchArgs = serde_json::from_value(v).unwrap();
         assert_eq!(a.batch_timeout, Some(600));
         assert_eq!(a.max_concurrent_routers, 4);
+    }
+
+    #[test]
+    fn template_args_defaults_apply_and_dry_run_to_false() {
+        let v = serde_json::json!({
+            "template_content":"set system host-name {{ name }}",
+            "vars_content":"{\"name\":\"r1\"}",
+            "router_name":"r1"
+        });
+        let a: TemplateArgs = serde_json::from_value(v).unwrap();
+        assert!(!a.apply_config);
+        assert!(!a.dry_run);
+        assert_eq!(a.commit_comment, "Configuration loaded via MCP");
+        assert_eq!(a.router_name.as_deref(), Some("r1"));
+        assert!(a.router_names.is_none());
+    }
+
+    #[test]
+    fn template_args_accepts_router_names_list() {
+        let v = serde_json::json!({
+            "template_content":"set foo",
+            "vars_content":"{}",
+            "router_names":["r1","r2"]
+        });
+        let a: TemplateArgs = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            a.router_names.as_deref(),
+            Some(&["r1".into(), "r2".into()][..])
+        );
     }
 }
