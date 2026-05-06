@@ -8,8 +8,8 @@
 use rust_junosmcp_core::{
     policy::Policy,
     tools::{
-        config_diff, execute_command, facts, get_config, router_list, ConfigDiffArgs,
-        ExecuteCommandArgs, GatherFactsArgs, GetConfigArgs,
+        batch, config_diff, execute_command, facts, get_config, pfe, router_list, ConfigDiffArgs,
+        ExecuteBatchArgs, ExecuteCommandArgs, ExecutePfeArgs, GatherFactsArgs, GetConfigArgs,
     },
     DeviceManager, Inventory,
 };
@@ -129,4 +129,72 @@ async fn gather_facts() {
     .unwrap();
     assert!(v.get("hostname").is_some());
     assert!(v.get("version").is_some());
+}
+
+// --- Sub-project #3: PFE + batch ----------------------------------------
+
+fn live_inv() -> Option<Arc<Inventory>> {
+    let host = std::env::var("JMCP_TEST_HOST").ok()?;
+    let user = std::env::var("JMCP_TEST_USER").ok()?;
+    let pass = std::env::var("JMCP_TEST_PASS").ok()?;
+    let json = format!(
+        r#"{{"r1":{{"ip":"{host}","username":"{user}","auth":{{"type":"password","password":"{pass}"}}}}}}"#
+    );
+    let mut f = tempfile::NamedTempFile::new().unwrap();
+    f.write_all(json.as_bytes()).unwrap();
+    Some(Arc::new(
+        Inventory::load(f.path()).unwrap(),
+    ))
+}
+
+#[tokio::test]
+#[ignore]
+async fn live_batch_show_version_one_router_one_command() {
+    let inv = match live_inv() {
+        Some(i) => i,
+        None => {
+            eprintln!("skipped: JMCP_TEST_HOST/USER/PASS not set");
+            return;
+        }
+    };
+    let dm = Arc::new(DeviceManager::new(inv.clone()));
+    let pol = Arc::new(Policy::build(&inv).unwrap());
+    let args = ExecuteBatchArgs {
+        routers: vec!["r1".into()],
+        commands: vec!["show version".into()],
+        command_timeout: 30,
+        batch_timeout: Some(60),
+        max_concurrent_routers: 1,
+    };
+    let v = batch::handle(args, dm, pol).await.unwrap();
+    let arr = v.as_array().expect("array");
+    assert_eq!(arr.len(), 1);
+    let cmds = arr[0].pointer("/commands").unwrap().as_array().unwrap();
+    assert_eq!(cmds.len(), 1);
+    assert_eq!(cmds[0].get("ok"), Some(&serde_json::json!(true)));
+    let value = cmds[0].get("value").and_then(|v| v.as_str()).unwrap();
+    assert!(!value.trim().is_empty(), "expected non-empty CLI output");
+}
+
+#[tokio::test]
+#[ignore]
+async fn live_pfe_show_jnh_stats_packet() {
+    let inv = match live_inv() {
+        Some(i) => i,
+        None => {
+            eprintln!("skipped: JMCP_TEST_HOST/USER/PASS not set");
+            return;
+        }
+    };
+    let dm = Arc::new(DeviceManager::new(inv.clone()));
+    let pol = Arc::new(Policy::build(&inv).unwrap());
+    let args = ExecutePfeArgs {
+        router_name: "r1".into(),
+        fpc_target: std::env::var("JMCP_TEST_FPC").unwrap_or_else(|_| "fpc0".into()),
+        pfe_command: "show jnh 0 stats packet".into(),
+        timeout: 30,
+    };
+    let v = pfe::handle(args, dm, pol).await.unwrap();
+    let output = v.get("output").and_then(|x| x.as_str()).unwrap();
+    assert!(!output.trim().is_empty(), "expected non-empty PFE output");
 }
