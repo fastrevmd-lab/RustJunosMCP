@@ -236,7 +236,7 @@ fn pfe_connect_failure_surfaces_through_tool_call() {
     ensure_built();
     // Unreachable IP/port so connect must fail.
     let inv = write_tmp(
-        r#"{"r1":{"ip":"203.0.113.1","port":1,"username":"u","auth":{"type":"password","password":"x"}}}"#,
+        r#"{"r1":{"ip":"127.0.0.1","port":1,"username":"u","auth":{"type":"password","password":"x"}}}"#,
     );
     let dir = tempfile::tempdir().unwrap();
     let toks = dir.path().join("tokens.json");
