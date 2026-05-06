@@ -2611,6 +2611,7 @@ dependencies = [
 name = "rust-junosmcp-core"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "globset",
  "rustez",
  "schemars",
