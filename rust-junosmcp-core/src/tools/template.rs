@@ -36,16 +36,8 @@ pub(crate) fn render(template_content: &str, vars: &Value) -> Result<String, Jmc
     let tmpl = env
         .template_from_str(template_content)
         .map_err(|e| JmcpError::TemplateSyntax(format!("{e}")))?;
-    tmpl.render(vars).map_err(|e| {
-        let err_msg = format!("{e}");
-        // If it's an undefined variable error, try to include context from template
-        if err_msg.contains("undefined") {
-            // Extract variable references from template for better error context
-            JmcpError::TemplateRender(format!("{err_msg} (template: {template_content})"))
-        } else {
-            JmcpError::TemplateRender(err_msg)
-        }
-    })
+    tmpl.render(vars)
+        .map_err(|e| JmcpError::TemplateRender(format!("{e}")))
 }
 
 #[cfg(test)]
@@ -108,7 +100,7 @@ mod tests {
             &parse_vars("{}").unwrap(),
         );
         match r {
-            Err(JmcpError::TemplateRender(s)) => assert!(s.contains("missing")),
+            Err(JmcpError::TemplateRender(s)) => assert!(s.contains("undefined")),
             other => panic!("expected TemplateRender, got {other:?}"),
         }
     }
