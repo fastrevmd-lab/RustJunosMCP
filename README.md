@@ -5,14 +5,16 @@ devices, written in Rust. Drop-in compatible with [Juniper/junos-mcp-server](htt
 on the inventory format and tool surface, but built on async Rust ([rustEZ](https://github.com/fastrevmd-lab/rustEZ) + [rustnetconf](https://github.com/fastrevmd-lab/rustnetconf))
 instead of PyEZ.
 
-> ## v0.2.0 released
+> ## v0.2.1 released
 >
-> Remote MCP transport is here: streamable-HTTP with bearer-token auth, per-token
-> router/tool scopes, optional rustls TLS, and SIGHUP hot-reload of the token
-> store. Stdio path is unchanged.
+> PFE + batch tools: `execute_junos_pfe_command` (single FPC-targeted PFE call)
+> and `execute_junos_command_batch` (N routers x M commands, parallel across
+> routers). New independent `pfe_commands` blocklist list.
 >
-> See the [v0.2.0 release notes](https://github.com/fastrevmd-lab/RustJunosMCP/releases/tag/v0.2.0)
-> and the [Remote transport + auth](#remote-transport--auth-v02) section below.
+> See the [v0.2.1 release notes](https://github.com/fastrevmd-lab/RustJunosMCP/releases/tag/v0.2.1)
+> and the [v0.2 follow-up: PFE + batch](#v02-follow-up-pfe--batch-released)
+> section below. v0.2.0 (remote transport + auth) notes remain at
+> [v0.2.0](https://github.com/fastrevmd-lab/RustJunosMCP/releases/tag/v0.2.0).
 
 ## Feature scope
 
