@@ -29,6 +29,9 @@ pub enum JmcpError {
     #[error("rollback version {0} out of range (1..=49)")]
     BadRollbackVersion(i64),
 
+    #[error("invalid source_path [code=bad_source_path]: {0}")]
+    BadSourcePath(String),
+
     #[error("operation timed out after {0:?}")]
     Timeout(std::time::Duration),
 
