@@ -32,6 +32,15 @@ pub enum JmcpError {
     #[error("invalid source_path [code=bad_source_path]: {0}")]
     BadSourcePath(String),
 
+    #[error(
+        "insufficient disk [code=insufficient_disk]: {message} (free={free}B required={required}B)"
+    )]
+    InsufficientDisk {
+        free: u64,
+        required: u64,
+        message: String,
+    },
+
     #[error("operation timed out after {0:?}")]
     Timeout(std::time::Duration),
 

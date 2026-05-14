@@ -392,3 +392,104 @@ mod runner_tests {
         assert_eq!(calls[0][0], "-O");
     }
 }
+
+/// Parse the free-bytes column for `/var` from `show system storage no-forwarding`.
+/// Junos prints rows like:
+/// ```text
+/// Filesystem              Size       Used      Avail  Capacity   Mounted on
+/// /dev/gpt/junos          14G       8.5G       4.4G       66%   /.mount
+/// /dev/gpt/varlog         3.0G      1.1G       1.7G       40%   /.mount/var/log
+/// /dev/gpt/var            10G       2.1G       7.0G       23%   /.mount/var
+/// ```
+/// We want the `Avail` column on the row whose `Mounted on` equals `/.mount/var`
+/// (or `/var` for older Junos). Returns bytes.
+pub fn parse_storage_free_bytes(output: &str) -> Result<u64, JmcpError> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("Filesystem") {
+            continue;
+        }
+        let fields: Vec<&str> = trimmed.split_whitespace().collect();
+        // Expect: filesystem size used avail capacity mounted_on
+        if fields.len() < 6 {
+            continue;
+        }
+        let mount = fields[fields.len() - 1];
+        if mount == "/var" || mount == "/.mount/var" {
+            return parse_size_with_suffix(fields[3]);
+        }
+    }
+    Err(JmcpError::InsufficientDisk {
+        free: 0,
+        required: 0,
+        message: "no /var or /.mount/var row found in storage output".into(),
+    })
+}
+
+fn parse_size_with_suffix(s: &str) -> Result<u64, JmcpError> {
+    let (num_part, mult): (&str, u64) = if let Some(stripped) = s.strip_suffix('G') {
+        (stripped, 1024 * 1024 * 1024)
+    } else if let Some(stripped) = s.strip_suffix('M') {
+        (stripped, 1024 * 1024)
+    } else if let Some(stripped) = s.strip_suffix('K') {
+        (stripped, 1024)
+    } else if let Some(stripped) = s.strip_suffix('B') {
+        (stripped, 1)
+    } else {
+        (s, 1)
+    };
+    let n: f64 = num_part.parse().map_err(|_| JmcpError::InsufficientDisk {
+        free: 0,
+        required: 0,
+        message: format!("could not parse storage size '{s}'"),
+    })?;
+    Ok((n * mult as f64) as u64)
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::*;
+
+    const SAMPLE: &str = "\
+Filesystem              Size       Used      Avail  Capacity   Mounted on
+/dev/gpt/junos          14G       8.5G       4.4G       66%   /.mount
+/dev/gpt/varlog         3.0G      1.1G       1.7G       40%   /.mount/var/log
+/dev/gpt/var            10G       2.1G       7.0G       23%   /.mount/var
+";
+
+    #[test]
+    fn finds_var_mount_in_modern_layout() {
+        let n = parse_storage_free_bytes(SAMPLE).unwrap();
+        // 7.0G ≈ 7516192768
+        assert!((6_900_000_000..7_600_000_000).contains(&n), "got {n}");
+    }
+
+    #[test]
+    fn handles_legacy_var_mount() {
+        let s = "\
+Filesystem      Size   Used  Avail Capacity   Mounted on
+/dev/ad0s1f     5.0G   1.0G   4.0G    20%   /var
+";
+        let n = parse_storage_free_bytes(s).unwrap();
+        assert!((3_900_000_000..4_400_000_000).contains(&n));
+    }
+
+    #[test]
+    fn errors_when_var_row_missing() {
+        let s = "Filesystem  Size Used Avail Capacity Mounted on\n/dev/x 1G 0 1G 0% /\n";
+        assert!(matches!(
+            parse_storage_free_bytes(s),
+            Err(JmcpError::InsufficientDisk { .. })
+        ));
+    }
+
+    #[test]
+    fn parses_megabyte_suffix() {
+        let s = "\
+Filesystem  Size Used Avail Capacity Mounted on
+/dev/x      500M 100M 400M 20% /var
+";
+        let n = parse_storage_free_bytes(s).unwrap();
+        assert!((400_000_000..420_000_000).contains(&n));
+    }
+}
