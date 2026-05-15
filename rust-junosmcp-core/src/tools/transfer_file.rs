@@ -3,8 +3,13 @@
 //! pre/post-transfer sha256 verification.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use crate::device_manager::DeviceManager;
 use crate::error::JmcpError;
+use crate::inventory::AuthConfig;
+use crate::tools::TransferFileArgs;
+use serde_json::Value;
 
 /// Validate that `source_path` is a safe basename. Rejects:
 /// - empty
@@ -552,5 +557,202 @@ mod checksum_tests {
     fn errors_on_garbage_output() {
         let s = "fzzt fzzt nothing here\n";
         assert!(parse_checksum_output(s).is_err());
+    }
+}
+
+/// Configuration handed to `handle()`. Holds the staging-dir + known-hosts
+/// paths and the (mockable) ScpRunner. Built once in `main.rs` and cloned
+/// per call.
+#[derive(Clone)]
+pub struct TransferConfig {
+    pub staging_dir: std::path::PathBuf,
+    pub known_hosts_file: std::path::PathBuf,
+    pub scp_runner: Arc<dyn ScpRunner>,
+}
+
+pub async fn handle(
+    args: TransferFileArgs,
+    dm: Arc<DeviceManager>,
+    cfg: TransferConfig,
+) -> Result<Value, JmcpError> {
+    let timeout = std::time::Duration::from_secs(args.timeout);
+    tokio::time::timeout(timeout, async move {
+        validate_source_basename(&args.source_path)?;
+        let local_path = cfg.staging_dir.join(&args.source_path);
+        let meta = std::fs::metadata(&local_path).map_err(|_| {
+            JmcpError::BadSourcePath(format!(
+                "staged file not found or unreadable: {}",
+                local_path.display()
+            ))
+        })?;
+        if !meta.is_file() {
+            return Err(JmcpError::BadSourcePath(format!(
+                "staged path is not a regular file: {}",
+                local_path.display()
+            )));
+        }
+        // Compute local sha256 + size (streamed).
+        let (local_sha, _local_size) = sha256_file(&local_path).await?;
+
+        // NOTE: The order is intentional — local sha256 is computed BEFORE the
+        // auth check. The `rejects_password_auth_with_unsupported_auth` test
+        // assumes UnsupportedAuth fires after a successful sha256, so do not
+        // reorder these without updating that test.
+
+        // Resolve device + check auth type.
+        let inv = dm.inventory();
+        let entry = inv.get(&args.router_name)?;
+        if let AuthConfig::Password { .. } = entry.auth {
+            return Err(JmcpError::UnsupportedAuth(args.router_name.clone()));
+        }
+
+        // The remaining steps (free-disk check, remote sha probe, scp, post-verify)
+        // land in Tasks 13 + 14. Stub a placeholder error so this task can ship
+        // independently with passing tests.
+        let _ = (local_sha, &cfg);
+        Err(JmcpError::Validation(
+            "transfer pipeline not yet implemented".into(),
+        ))
+    })
+    .await
+    .map_err(|_| JmcpError::TransferOuterTimeout(timeout))?
+}
+
+#[cfg(test)]
+mod handle_validation_tests {
+    use super::*;
+    use crate::inventory::Inventory;
+    use std::io::Write;
+
+    fn cfg(dir: &std::path::Path) -> TransferConfig {
+        TransferConfig {
+            staging_dir: dir.to_path_buf(),
+            known_hosts_file: "/etc/jmcp/known_hosts".into(),
+            scp_runner: MockScpRunner::ok(),
+        }
+    }
+
+    fn build_inv(json: &str) -> Arc<Inventory> {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(json.as_bytes()).unwrap();
+        Arc::new(Inventory::load(f.path()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn rejects_bad_basename() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = build_inv(
+            r#"{"r1":{"ip":"127.0.0.1","username":"u",
+                     "auth":{"type":"password","password":"x"}}}"#,
+        );
+        let dm = Arc::new(DeviceManager::new(inv));
+        let r = handle(
+            TransferFileArgs {
+                router_name: "r1".into(),
+                source_path: "../etc/passwd".into(),
+                force: false,
+                verify: true,
+                timeout: 5,
+            },
+            dm,
+            cfg(dir.path()),
+        )
+        .await;
+        assert!(matches!(r, Err(JmcpError::BadSourcePath(_))));
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_staged_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = build_inv(
+            r#"{"r1":{"ip":"127.0.0.1","username":"u",
+                     "auth":{"type":"password","password":"x"}}}"#,
+        );
+        let dm = Arc::new(DeviceManager::new(inv));
+        let r = handle(
+            TransferFileArgs {
+                router_name: "r1".into(),
+                source_path: "missing.tgz".into(),
+                force: false,
+                verify: true,
+                timeout: 5,
+            },
+            dm,
+            cfg(dir.path()),
+        )
+        .await;
+        assert!(matches!(r, Err(JmcpError::BadSourcePath(_))));
+    }
+
+    #[tokio::test]
+    async fn rejects_password_auth_with_unsupported_auth() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("foo.tgz"), b"abc").unwrap();
+        let inv = build_inv(
+            r#"{"r1":{"ip":"127.0.0.1","username":"u",
+                     "auth":{"type":"password","password":"x"}}}"#,
+        );
+        let dm = Arc::new(DeviceManager::new(inv));
+        let r = handle(
+            TransferFileArgs {
+                router_name: "r1".into(),
+                source_path: "foo.tgz".into(),
+                force: false,
+                verify: true,
+                timeout: 5,
+            },
+            dm,
+            cfg(dir.path()),
+        )
+        .await;
+        assert!(matches!(r, Err(JmcpError::UnsupportedAuth(ref s)) if s == "r1"));
+    }
+
+    #[tokio::test]
+    async fn rejects_directory_as_source() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+        let inv = build_inv(
+            r#"{"r1":{"ip":"127.0.0.1","username":"u",
+                     "auth":{"type":"password","password":"x"}}}"#,
+        );
+        let dm = Arc::new(DeviceManager::new(inv));
+        let r = handle(
+            TransferFileArgs {
+                router_name: "r1".into(),
+                source_path: "subdir".into(),
+                force: false,
+                verify: true,
+                timeout: 5,
+            },
+            dm,
+            cfg(dir.path()),
+        )
+        .await;
+        assert!(matches!(r, Err(JmcpError::BadSourcePath(_))));
+    }
+
+    #[tokio::test]
+    async fn unknown_router_propagates_unknown_router_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("foo.tgz"), b"abc").unwrap();
+        let inv = build_inv(
+            r#"{"r1":{"ip":"127.0.0.1","username":"u",
+                     "auth":{"type":"password","password":"x"}}}"#,
+        );
+        let dm = Arc::new(DeviceManager::new(inv));
+        let r = handle(
+            TransferFileArgs {
+                router_name: "nope".into(),
+                source_path: "foo.tgz".into(),
+                force: false,
+                verify: true,
+                timeout: 5,
+            },
+            dm,
+            cfg(dir.path()),
+        )
+        .await;
+        assert!(matches!(r, Err(JmcpError::UnknownRouter(_))));
     }
 }
