@@ -16,10 +16,11 @@ chmod 755 /usr/local/bin/rust-junosmcp
 # File-transfer surface (transfer_file / list_staged_files).
 # Staging dir owner+mode is covered by the chown -R above; ensure mode is 0755.
 chmod 0755 /var/lib/jmcp/staging
-# known_hosts must exist (empty is fine) so the SCP runner can pin host keys.
-if [[ ! -f /etc/jmcp/known_hosts ]]; then
-    touch /etc/jmcp/known_hosts
-fi
+# known_hosts must exist (empty is fine) so the SCP runner can append host
+# keys via UserKnownHostsFile=path. File ownership is sufficient — the runner
+# only appends to the file, never recreates it, so /etc/jmcp dir ownership
+# does not need to be jmcp.
+touch /etc/jmcp/known_hosts
 chown jmcp:jmcp /etc/jmcp/known_hosts
 chmod 0644 /etc/jmcp/known_hosts
 
