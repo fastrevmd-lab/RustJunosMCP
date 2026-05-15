@@ -393,9 +393,32 @@ impl JmcpHandler {
         if let Err(e) = self.check_router_scope(ctx, "transfer_file", &args.router_name) {
             return Self::scope_to_call_result(e);
         }
-        Self::to_call_result(
-            transfer_file::handle(args, self.dm.clone(), self.transfer_config().clone()).await,
-        )
+        let token = ctx.map(|c| c.token_name.as_str()).unwrap_or("stdio");
+        let router = args.router_name.clone();
+        let basename = args.source_path.clone();
+        let result =
+            transfer_file::handle(args, self.dm.clone(), self.transfer_config().clone()).await;
+        match &result {
+            Ok(v) => tracing::info!(
+                tool = "transfer_file",
+                token = token,
+                router = %router,
+                basename = %basename,
+                status = v.get("status").and_then(|s| s.as_str()).unwrap_or("ok"),
+                sha256 = v.get("sha256").and_then(|s| s.as_str()).unwrap_or(""),
+                "audit"
+            ),
+            Err(e) => tracing::info!(
+                tool = "transfer_file",
+                token = token,
+                router = %router,
+                basename = %basename,
+                outcome = "error",
+                error = %e,
+                "audit"
+            ),
+        }
+        Self::to_call_result(result)
     }
 
     #[tool(
@@ -416,14 +439,36 @@ impl JmcpHandler {
                 return Self::scope_to_call_result(e);
             }
         }
-        Self::to_call_result(
-            list_staged_files::handle(
-                args,
-                self.dm.clone(),
-                self.transfer_config().staging_dir.clone(),
-            )
-            .await,
+        let token = ctx.map(|c| c.token_name.as_str()).unwrap_or("stdio");
+        let router = args.router_name.clone().unwrap_or_default();
+        let result = list_staged_files::handle(
+            args,
+            self.dm.clone(),
+            self.transfer_config().staging_dir.clone(),
         )
+        .await;
+        match &result {
+            Ok(v) => tracing::info!(
+                tool = "list_staged_files",
+                token = token,
+                router = %router,
+                staged_count = v
+                    .get("staged_files")
+                    .and_then(|a| a.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0),
+                "audit"
+            ),
+            Err(e) => tracing::info!(
+                tool = "list_staged_files",
+                token = token,
+                router = %router,
+                outcome = "error",
+                error = %e,
+                "audit"
+            ),
+        }
+        Self::to_call_result(result)
     }
 }
 

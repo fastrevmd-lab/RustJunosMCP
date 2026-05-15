@@ -259,6 +259,18 @@ pub fn build_scp_argv(job: &ScpJob) -> Vec<String> {
         "ServerAliveInterval=10".into(),
         "-o".into(),
         "ServerAliveCountMax=3".into(),
+        // Hardening: never prompt, never fall back to password / kbd-int /
+        // ssh-agent identities. The configured -i key is the only credential
+        // scp may use. BatchMode also disables tty-based prompts so a hung
+        // server can't block forever.
+        "-o".into(),
+        "BatchMode=yes".into(),
+        "-o".into(),
+        "PasswordAuthentication=no".into(),
+        "-o".into(),
+        "PreferredAuthentications=publickey".into(),
+        "-o".into(),
+        "IdentitiesOnly=yes".into(),
         "-P".into(),
         job.port.to_string(),
         job.local_path.display().to_string(),
@@ -295,6 +307,19 @@ mod argv_tests {
         let joined = v.join(" ");
         assert!(joined.contains("StrictHostKeyChecking=accept-new"));
         assert!(joined.contains("UserKnownHostsFile=/etc/jmcp/known_hosts"));
+    }
+
+    #[test]
+    fn argv_includes_hardening_flags() {
+        // Pin the hardened auth posture: no password fallback, no agent keys,
+        // no interactive prompts. Regressing any of these would silently widen
+        // the credential surface scp uses on every push.
+        let v = build_scp_argv(&job());
+        let joined = v.join(" ");
+        assert!(joined.contains("BatchMode=yes"));
+        assert!(joined.contains("PasswordAuthentication=no"));
+        assert!(joined.contains("PreferredAuthentications=publickey"));
+        assert!(joined.contains("IdentitiesOnly=yes"));
     }
 
     #[test]
@@ -608,12 +633,21 @@ pub async fn handle(
     tokio::time::timeout(timeout, async move {
         validate_source_basename(&args.source_path)?;
         let local_path = cfg.staging_dir.join(&args.source_path);
-        let meta = std::fs::metadata(&local_path).map_err(|_| {
+        // symlink_metadata() does NOT follow symlinks — combined with the
+        // explicit is_symlink() reject below, this guarantees we never read or
+        // hash a file outside the staging dir via a symlink in the staging dir.
+        let meta = std::fs::symlink_metadata(&local_path).map_err(|_| {
             JmcpError::BadSourcePath(format!(
                 "staged file not found or unreadable: {}",
                 local_path.display()
             ))
         })?;
+        if meta.file_type().is_symlink() {
+            return Err(JmcpError::BadSourcePath(format!(
+                "staged path is a symlink, refusing to follow: {}",
+                local_path.display()
+            )));
+        }
         if !meta.is_file() {
             return Err(JmcpError::BadSourcePath(format!(
                 "staged path is not a regular file: {}",
@@ -857,6 +891,44 @@ mod handle_validation_tests {
         )
         .await;
         assert!(matches!(r, Err(JmcpError::UnsupportedAuth(ref s)) if s == "r1"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_symlink_as_source() {
+        // Plant a symlink in the staging dir pointing outside it. handle()
+        // must reject it as BadSourcePath BEFORE hashing or auth, so we
+        // never read or expose the link target.
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), b"secret").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("link.tgz")).unwrap();
+        let inv = build_inv(
+            r#"{"r1":{"ip":"127.0.0.1","username":"u",
+                     "auth":{"type":"password","password":"x"}}}"#,
+        );
+        let dm = Arc::new(DeviceManager::new(inv));
+        let r = handle(
+            TransferFileArgs {
+                router_name: "r1".into(),
+                source_path: "link.tgz".into(),
+                force: false,
+                verify: true,
+                timeout: 5,
+            },
+            dm,
+            cfg(dir.path()),
+        )
+        .await;
+        match r {
+            Err(JmcpError::BadSourcePath(msg)) => {
+                assert!(
+                    msg.contains("symlink"),
+                    "expected symlink reject message, got: {msg}"
+                );
+            }
+            other => panic!("expected BadSourcePath(symlink…), got {other:?}"),
+        }
     }
 
     #[tokio::test]

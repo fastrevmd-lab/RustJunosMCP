@@ -132,7 +132,14 @@ pub async fn read_staging_dir(staging_dir: &Path) -> Result<Vec<StagedFileEntry>
     }
     let mut rd = tokio::fs::read_dir(staging_dir).await?;
     while let Some(entry) = rd.next_entry().await? {
+        // DirEntry::metadata() does not follow symlinks (uses fstatat with
+        // AT_SYMLINK_NOFOLLOW on Unix), so we get the metadata of the link
+        // itself. Reject symlinks explicitly as defense-in-depth so we never
+        // hash or expose the target of a link planted in the staging dir.
         let meta = entry.metadata().await?;
+        if meta.file_type().is_symlink() {
+            continue;
+        }
         if !meta.is_file() {
             continue;
         }
