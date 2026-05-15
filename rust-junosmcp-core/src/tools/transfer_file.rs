@@ -890,3 +890,71 @@ mod handle_validation_tests {
         assert!(matches!(r, Err(JmcpError::UnknownRouter(_))));
     }
 }
+
+#[cfg(test)]
+mod scp_unit_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn mock_runner_records_argv_and_reports_success() {
+        let mock = MockScpRunner::with_outcome(ScpOutcome {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        let job = ScpJob {
+            host: "192.0.2.4".into(),
+            port: 22,
+            username: "admin".into(),
+            private_key_path: "/etc/jmcp/ssh/id_ed25519".into(),
+            known_hosts_file: "/etc/jmcp/known_hosts".into(),
+            local_path: "/var/lib/jmcp/staging/abc/junos.tgz".into(),
+            remote_dir: "/var/tmp/".into(),
+        };
+        let outcome = (mock.clone() as Arc<dyn ScpRunner>)
+            .run(&job)
+            .await
+            .unwrap();
+        assert_eq!(outcome.exit_code, 0);
+        let calls = mock.calls.lock().await;
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].iter().any(|s| s == "-O"), "argv missing -O");
+        assert!(
+            calls[0].iter().any(|s| s == "admin@192.0.2.4:/var/tmp/"),
+            "argv missing dest"
+        );
+    }
+
+    #[test]
+    fn scp_failed_display_includes_code() {
+        let e = JmcpError::ScpFailed {
+            exit_code: 1,
+            stderr: "permission denied".into(),
+        };
+        let s = e.to_string();
+        assert!(s.contains("[code=scp_failed]"), "got {}", s);
+        assert!(s.contains("permission denied"), "got {}", s);
+    }
+
+    #[test]
+    fn verify_mismatch_display_includes_code() {
+        let e = JmcpError::VerifyMismatch {
+            dest: "/var/tmp/foo.tgz".into(),
+            local_sha: "aa".repeat(32),
+            remote_sha: "bb".repeat(32),
+        };
+        let s = e.to_string();
+        assert!(s.contains("[code=verify_mismatch]"), "got {}", s);
+        assert!(s.contains("/var/tmp/foo.tgz"), "got {}", s);
+    }
+
+    #[test]
+    fn transfer_outer_timeout_display_includes_code() {
+        let e = JmcpError::TransferOuterTimeout(std::time::Duration::from_secs(600));
+        let s = e.to_string();
+        // actual Display tag is `[code=outer_timeout]` (error.rs line 76)
+        assert!(s.contains("[code=outer_timeout]"), "got {}", s);
+        assert!(s.contains("600s"), "got {}", s);
+    }
+}
