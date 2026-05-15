@@ -2638,6 +2638,7 @@ version = "0.3.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "chrono",
  "globset",
  "minijinja",
  "rustez",
