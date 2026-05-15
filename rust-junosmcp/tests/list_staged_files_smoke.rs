@@ -39,6 +39,14 @@ fn list_staged_files_returns_host_staging_only() {
 
     let resp = call_tool(&mut server, "list_staged_files", json!({}));
 
+    // Guard: if the tool returned an error envelope, surface it clearly
+    // instead of failing later with a confusing "missing alpha.tgz" message.
+    assert!(
+        resp.get("isError") != Some(&json!(true)),
+        "list_staged_files returned tool error: {}",
+        resp
+    );
+
     let text = resp.to_string();
     assert!(text.contains("alpha.tgz"), "missing alpha: {}", text);
     assert!(text.contains("beta.bin"), "missing beta: {}", text);
