@@ -80,6 +80,48 @@ pub enum JmcpError {
     )]
     TransferOuterTimeout(std::time::Duration),
 
+    #[error(
+        "confirmation required [code=confirmation_required]: re-call with confirm=true to proceed; plan: {payload}"
+    )]
+    ConfirmationRequired { payload: serde_json::Value },
+
+    #[error(
+        "cluster device unsupported [code=cluster_unsupported]: router '{router}' is a chassis cluster; upgrade_junos v1 supports standalone devices only (ISSU support deferred to v2)"
+    )]
+    UpgradeClusterUnsupported { router: String },
+
+    #[error(
+        "active commit-confirmed window [code=commit_confirmed_active]: router '{router}' has a pending rollback in {rollback_secs}s; run `commit` or `rollback` first, then retry"
+    )]
+    UpgradeCommitConfirmedActive { router: String, rollback_secs: u64 },
+
+    #[error(
+        "install RPC timed out [code=install_timeout]: router '{router}' after {elapsed:?}; the install may still be running on the device — check from console or retry once the device is reachable"
+    )]
+    UpgradeInstallTimeout {
+        router: String,
+        elapsed: std::time::Duration,
+    },
+
+    #[error(
+        "device did not return after reboot [code=reboot_timeout]: router '{router}' did not reopen NETCONF within {waited_secs}s; check console / hardware status"
+    )]
+    UpgradeRebootTimeout { router: String, waited_secs: u64 },
+
+    #[error(
+        "post-upgrade version mismatch [code=postverify_mismatch]: router '{router}' expected '{expected}', got '{observed}'; the install may have rolled back or failed silently"
+    )]
+    UpgradePostVerifyMismatch {
+        router: String,
+        expected: String,
+        observed: String,
+    },
+
+    #[error(
+        "upgrade outer timeout [code=upgrade_outer_timeout] after {0:?}; raise the `timeout` arg or check device responsiveness"
+    )]
+    UpgradeOuterTimeout(std::time::Duration),
+
     #[error("operation timed out after {0:?}")]
     Timeout(std::time::Duration),
 
@@ -431,5 +473,86 @@ mod tests {
         let s = JmcpError::TransferOuterTimeout(std::time::Duration::from_secs(60)).to_string();
         assert!(s.contains("code=outer_timeout"));
         assert!(s.contains("raise"));
+    }
+
+    #[test]
+    fn confirmation_required_display_includes_code_and_router() {
+        let payload = serde_json::json!({
+            "router": "vsrx-test18",
+            "current_version": "24.4R1.9",
+            "target_version": "25.4R1.12",
+        });
+        let s = JmcpError::ConfirmationRequired {
+            payload: payload.clone(),
+        }
+        .to_string();
+        assert!(s.contains("[code=confirmation_required]"), "got {s}");
+        assert!(s.contains("vsrx-test18"), "got {s}");
+        assert!(s.contains("25.4R1.12"), "got {s}");
+    }
+
+    #[test]
+    fn upgrade_cluster_unsupported_display_includes_code_and_router() {
+        let s = JmcpError::UpgradeClusterUnsupported {
+            router: "vsrx-test19".into(),
+        }
+        .to_string();
+        assert!(s.contains("[code=cluster_unsupported]"), "got {s}");
+        assert!(s.contains("vsrx-test19"), "got {s}");
+    }
+
+    #[test]
+    fn upgrade_commit_confirmed_active_display_includes_code_and_rollback() {
+        let s = JmcpError::UpgradeCommitConfirmedActive {
+            router: "vsrx-test10".into(),
+            rollback_secs: 540,
+        }
+        .to_string();
+        assert!(s.contains("[code=commit_confirmed_active]"), "got {s}");
+        assert!(s.contains("vsrx-test10"), "got {s}");
+        assert!(s.contains("540"), "got {s}");
+    }
+
+    #[test]
+    fn upgrade_install_timeout_display_includes_code() {
+        let s = JmcpError::UpgradeInstallTimeout {
+            router: "vsrx-test10".into(),
+            elapsed: std::time::Duration::from_secs(3600),
+        }
+        .to_string();
+        assert!(s.contains("[code=install_timeout]"), "got {s}");
+        assert!(s.contains("vsrx-test10"), "got {s}");
+    }
+
+    #[test]
+    fn upgrade_reboot_timeout_display_includes_code_and_secs() {
+        let s = JmcpError::UpgradeRebootTimeout {
+            router: "vsrx-test10".into(),
+            waited_secs: 480,
+        }
+        .to_string();
+        assert!(s.contains("[code=reboot_timeout]"), "got {s}");
+        assert!(s.contains("vsrx-test10"), "got {s}");
+        assert!(s.contains("480"), "got {s}");
+    }
+
+    #[test]
+    fn upgrade_postverify_mismatch_display_includes_versions() {
+        let s = JmcpError::UpgradePostVerifyMismatch {
+            router: "vsrx-test10".into(),
+            expected: "25.4R1.12".into(),
+            observed: "24.4R1.9".into(),
+        }
+        .to_string();
+        assert!(s.contains("[code=postverify_mismatch]"), "got {s}");
+        assert!(s.contains("25.4R1.12"), "got {s}");
+        assert!(s.contains("24.4R1.9"), "got {s}");
+    }
+
+    #[test]
+    fn upgrade_outer_timeout_display_includes_code_and_duration() {
+        let s = JmcpError::UpgradeOuterTimeout(std::time::Duration::from_secs(900)).to_string();
+        assert!(s.contains("[code=upgrade_outer_timeout]"), "got {s}");
+        assert!(s.contains("900s"), "got {s}");
     }
 }
