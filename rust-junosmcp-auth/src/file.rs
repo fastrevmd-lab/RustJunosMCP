@@ -244,31 +244,34 @@ fn friendly_read_error(path: &Path, err: std::io::Error) -> TokenStoreError {
     if err.kind() != std::io::ErrorKind::PermissionDenied {
         return TokenStoreError::Io(err);
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        // SAFETY: `getuid()` has no preconditions and is async-signal-safe.
-        let caller_uid = unsafe { libc::getuid() };
-        let owner_info = match std::fs::metadata(path) {
-            Ok(md) => format!("owner uid {}, mode {:o}", md.uid(), md.mode() & 0o777),
-            // Metadata can fail (e.g. EACCES on the parent dir); fall back
-            // to caller info alone so the hint stays useful.
-            Err(_) => "owner unknown".to_string(),
-        };
-        return TokenStoreError::Invalid(format!(
-            "cannot read {}: permission denied ({owner_info}; running as uid {caller_uid}). \
-             Hint: if a systemd unit runs the server as a dedicated user (e.g. `User=jmcp`), \
-             token subcommands minted the file with the wrong ownership. Either \
-             `sudo -u <service-user> rust-junosmcp token ...` next time, or fix the \
-             current file: `chown <service-user>:<service-group> {}`",
-            path.display(),
-            path.display()
-        ));
-    }
-    #[cfg(not(unix))]
-    {
-        TokenStoreError::Io(err)
-    }
+    eacces_to_friendly(path, err)
+}
+
+#[cfg(unix)]
+fn eacces_to_friendly(path: &Path, _err: std::io::Error) -> TokenStoreError {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: `getuid()` has no preconditions and is async-signal-safe.
+    let caller_uid = unsafe { libc::getuid() };
+    let owner_info = match std::fs::metadata(path) {
+        Ok(md) => format!("owner uid {}, mode {:o}", md.uid(), md.mode() & 0o777),
+        // Metadata can fail (e.g. EACCES on the parent dir); fall back
+        // to caller info alone so the hint stays useful.
+        Err(_) => "owner unknown".to_string(),
+    };
+    TokenStoreError::Invalid(format!(
+        "cannot read {}: permission denied ({owner_info}; running as uid {caller_uid}). \
+         Hint: if a systemd unit runs the server as a dedicated user (e.g. `User=jmcp`), \
+         token subcommands minted the file with the wrong ownership. Either \
+         `sudo -u <service-user> rust-junosmcp token ...` next time, or fix the \
+         current file: `chown <service-user>:<service-group> {}`",
+        path.display(),
+        path.display()
+    ))
+}
+
+#[cfg(not(unix))]
+fn eacces_to_friendly(_path: &Path, err: std::io::Error) -> TokenStoreError {
+    TokenStoreError::Io(err)
 }
 
 #[cfg(test)]
