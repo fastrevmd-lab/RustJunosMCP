@@ -35,7 +35,7 @@ tower            = "0.5"
 tower-http       = "0.6"
 http             = "1"
 rustls           = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-rustls-pemfile   = "2"
+rustls-pki-types = { version = "1", features = ["std"] }
 axum-server      = { version = "0.8", default-features = false }
 rcgen            = "0.14"
 tempfile         = "3"
