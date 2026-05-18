@@ -44,11 +44,7 @@ fn reload_with_file_name_swaps_inventory() {
     let mut child = spawn_stdio_server_with_args(&["-f", p1.to_str().unwrap()]);
 
     // v0.5.2: file_name must be a relative basename inside the inventory dir.
-    let r = call_tool(
-        &mut child,
-        "reload_devices",
-        json!({"file_name": "b.json"}),
-    );
+    let r = call_tool(&mut child, "reload_devices", json!({"file_name": "b.json"}));
     assert_eq!(r["new_router_count"], 1, "got: {r}");
     let list = call_tool(&mut child, "get_router_list", json!({}));
     let names: Vec<String> = serde_json::from_value(list.clone())
