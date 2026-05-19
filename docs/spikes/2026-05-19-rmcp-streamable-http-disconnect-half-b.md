@@ -79,13 +79,21 @@ Half B is **not** any of:
 
 ## What an upstream fix likely looks like
 
-Investigation needed in `rmcp::transport::streamable_http_server` (the
-`tower.rs` and `session/local.rs` modules in particular). The streamable-
-HTTP server today spawns the tool future via the session manager and
-returns the response as an SSE stream (or a single JSON body in stateless
-mode). When the client TCP-closes, axum/hyper see the disconnect and
-drop their write half of the response body, but the spawn handle for the
-tool future is not joined — it runs to completion.
+Code walk against rmcp 0.8.5 (`service.rs`, `streamable_http_server/`):
+
+- The per-request `request_ct` exposed to handlers is created in
+  `service.rs:746-748`, stored in a shared `local_ct_pool`, and fired
+  from exactly two places — outbound response (line 687-688) and
+  inbound `notifications/cancelled` (line 789-791).
+- The tool future is spawned at `service.rs:763`; its response travels
+  back to the serve loop over an unbounded mpsc, which never errors.
+- The SSE response body in `streamable_http_server/tower.rs:269-310`
+  has no path back into the serve loop on client disconnect.
+
+The same `local_ct_pool` pattern is unchanged in rmcp `main`
+(`rmcp-v1.7.0`, `cd2f5f1`). The new `StreamableHttpServerConfig::
+cancellation_token` field added in `main` is a server-wide graceful-
+shutdown signal — not a per-request HTTP-disconnect hook.
 
 Two candidate shapes for the fix:
 

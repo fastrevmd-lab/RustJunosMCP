@@ -1,7 +1,13 @@
 # Upstream rmcp issue draft
 
 **Target repo:** `modelcontextprotocol/rust-sdk`
-**Target version:** rmcp 0.8.5 (verify against `main` before filing)
+**Target version observed:** rmcp 0.8.5
+**Behavior in `main` (`rmcp-v1.7.0`, commit `cd2f5f1`):** same per-request
+cancellation plumbing in `service.rs` (`local_ct_pool`); the new
+`StreamableHttpServerConfig::cancellation_token` is server-wide
+(graceful-shutdown signal) and is **not** wired to per-request HTTP body
+lifecycle. Bug is expected to reproduce on `main` — still needs a runtime
+test to confirm.
 **Status:** draft — pre-filing, hold until minimal-repro confirmed
 
 ---
@@ -39,45 +45,105 @@ here for completeness once verified.)
 
 ### Reproduction
 
-Minimal example using the `counter` server pattern from
-`examples/servers/src/counter_streamhttp.rs`, with one long-sleep tool
-added:
+`Cargo.toml`:
+
+```toml
+[dependencies]
+rmcp = { version = "=0.8.5", features = ["server", "transport-streamable-http-server", "macros"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+axum = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+```
+
+`src/main.rs`:
 
 ```rust
-use rmcp::{ServerHandler, model::*, tool, tool_router};
+use std::sync::Arc;
+use rmcp::{
+    handler::server::router::tool::ToolRouter,
+    model::{ServerCapabilities, ServerInfo},
+    tool, tool_handler, tool_router,
+    transport::{
+        streamable_http_server::{
+            session::local::LocalSessionManager, tower::StreamableHttpService,
+        },
+        StreamableHttpServerConfig,
+    },
+    ServerHandler,
+};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
-struct Repro { tool_router: rmcp::handler::server::router::tool::ToolRouter<Self> }
+struct Repro { tool_router: ToolRouter<Self> }
+
+impl Repro {
+    fn new() -> Self { Self { tool_router: Self::tool_router() } }
+}
 
 #[tool_router]
 impl Repro {
-    pub fn new() -> Self { Self { tool_router: Self::tool_router() } }
-
-    /// Sleeps for 60s, polling the request token every 100ms.
-    /// Emits a log line on every poll so the journal shows whether
-    /// the future is still alive after the client disconnects.
     #[tool(description = "Sleep 60s, log every 100ms, observe cancel token")]
-    pub async fn long_sleep(&self, ct: CancellationToken) -> Result<CallToolResult, ErrorData> {
+    async fn long_sleep(&self, ct: CancellationToken) -> String {
+        let started = std::time::Instant::now();
         for i in 0..600 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            tracing::info!(i, cancelled = ct.is_cancelled(), "poll");
-            if ct.is_cancelled() {
-                return Ok(CallToolResult::success(vec![Content::text("cancelled")]));
-            }
+            tracing::info!(
+                i,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                cancelled = ct.is_cancelled(),
+                "poll"
+            );
+            if ct.is_cancelled() { return "cancelled".into(); }
         }
-        Ok(CallToolResult::success(vec![Content::text("ran to completion")]))
+        "ran_to_completion".into()
     }
 }
 
-impl ServerHandler for Repro { /* default */ }
+#[tool_handler(router = Self::tool_router())]
+impl ServerHandler for Repro {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            instructions: Some("rmcp disconnect repro".into()),
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            ..Default::default()
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+    let svc = StreamableHttpService::new(
+        || Ok(Repro::new()),
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig {
+            stateful_mode: false, // stateless = no session-id handshake
+            sse_keep_alive: Some(std::time::Duration::from_secs(15)),
+        },
+    );
+    let app = axum::Router::new().nest_service("/mcp", svc);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:8765").await?;
+    tracing::info!(addr = "127.0.0.1:8765", "listening");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
 ```
 
-Mount under axum as per the existing `counter_streamhttp` example, then:
+Invocation:
 
 ```
-# Terminal 1 — server with `RUST_LOG=info`
-$ cargo run --example counter_streamhttp
+# Terminal 1
+$ RUST_LOG=info cargo run
 
 # Terminal 2 — invoke the tool, then disconnect after 2s
 $ timeout 2 curl -sN \
@@ -85,12 +151,27 @@ $ timeout 2 curl -sN \
     -H 'Content-Type: application/json' \
     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
          "params":{"name":"long_sleep","arguments":{}}}' \
-    http://127.0.0.1:8000/mcp
+    http://127.0.0.1:8765/mcp
+# curl exits with 124 (timeout); leave the server running and watch the log
 ```
 
-**Observed:** Terminal 1 emits `poll i=N cancelled=false` for the full
-60 seconds. The future runs to completion ~58 seconds after curl
-disconnected.
+**Observed (live run 2026-05-19, rmcp 0.8.5, stateless mode):**
+
+```text
+2026-05-19T17:22:49.115Z  INFO  rmcp-disconnect-repro listening addr="127.0.0.1:8765"
+2026-05-19T17:22:57.657Z  INFO  poll i=0   elapsed_ms=101    cancelled=false   ← tool started
+2026-05-19T17:22:58.669Z  INFO  poll i=10  elapsed_ms=1112   cancelled=false
+                                                                                ← curl exited at ~17:22:59.553 (timeout 2s, exit 124)
+2026-05-19T17:23:02.722Z  INFO  poll i=50  elapsed_ms=5166   cancelled=false   ← +3 s post-disconnect
+2026-05-19T17:23:07.787Z  INFO  poll i=100 elapsed_ms=10231  cancelled=false   ← +8 s post-disconnect
+2026-05-19T17:23:10.829Z  INFO  poll i=130 elapsed_ms=13273  cancelled=false   ← +11 s post-disconnect
+2026-05-19T17:23:26.037Z  INFO  poll i=280 elapsed_ms=28480  cancelled=false   ← +27 s post-disconnect
+```
+
+281 polls executed after curl's TCP close, `cancelled=false` on every
+one. `sse_keep_alive` is set to its 15 s default — even one full
+keep-alive interval is not enough for the transport to learn about the
+disconnect and fire `RequestContext::ct`.
 
 **Expected:** `RequestContext::ct` fires when axum/hyper observes the
 client gone (at the latest on the next SSE keep-alive write), and the
@@ -103,40 +184,89 @@ shell-outs, anything destructive) cannot rely on the request token to
 bound their lifetime. A client that Ctrl-Cs or hits its own read timeout
 silently triggers the full server-side effect with no way to abort.
 
-For comparison, the stdio transport does behave correctly here: when the
-peer closes stdin, in-flight futures are dropped.
+For comparison, the stdio transport partially mitigates this in practice:
+when stdin closes, `transport.receive()` returns `None` and the serve
+loop breaks with `QuitReason::Closed` (`service.rs:613-619`). However,
+the individual tool spawn at `service.rs:763` is **not** joined by the
+loop on exit, and the `request_ct`s in `local_ct_pool` are only
+cancelled if the parent `serve_loop_ct` cancels — which happens through
+the `RunningService::dg: DropGuard` (`service.rs:852`) only when the
+caller drops `RunningService`. In practice stdio operators do drop the
+service when stdin EOFs, so the cascade fires; the streamable-HTTP
+transport keeps the service alive across many HTTP connections, so a
+single client TCP-disconnect cannot achieve the same effect.
 
-### Conjecture on root cause
+This makes the issue acutely visible on the streamable-HTTP transport,
+even though the underlying "no per-task disconnect signal" shape is
+shared.
 
-In `crates/rmcp/src/transport/streamable_http_server/`, the streamable-
-HTTP service splits the incoming `http::Request` into `(Parts, Body)`,
-inserts `Parts` into rmcp's per-request extensions, and spawns the tool
-future via the session manager. The SSE response body holds the writer
-half of the channel that the spawned future sends results on, but the
-spawn handle itself is not joined against the response body's drop.
-When axum drops the response body on client disconnect, the spawn
-handle keeps running; nothing fires `RequestContext::ct`.
+### Root cause (verified from code walk against 0.8.5)
 
-(I have not yet read the code end-to-end; happy to do so if useful and
-attach a more specific pointer.)
+The per-request `CancellationToken` exposed to handlers as
+`RequestContext::ct` is created inside `crates/rmcp/src/service.rs` in
+the shared serve loop:
+
+```text
+service.rs:746   let request_ct = serve_loop_ct.child_token();
+service.rs:747   let context_ct = request_ct.child_token();
+service.rs:748   local_ct_pool.insert(id.clone(), request_ct);
+service.rs:763   tokio::spawn(async move {
+service.rs:765       let result = service.handle_request(request, context).await;
+service.rs:777       let _send_result = sink.send(response).await;  // unbounded channel
+service.rs:778   });
+```
+
+`request_ct` is fired in exactly two places (`service.rs` in 0.8.5,
+same in `main`):
+
+```text
+service.rs:687-688   on outbound response (natural completion)
+                       if let Some(ct) = local_ct_pool.remove(id) { ct.cancel(); }
+
+service.rs:789-791   on inbound notifications/cancelled
+                       if let Some(ct) = local_ct_pool.remove(&cancelled.params.request_id) { ct.cancel(); }
+```
+
+For the **streamable-HTTP transport** specifically
+(`streamable_http_server/tower.rs:269-310`), each tool-call POST builds
+a session-scoped `Stream` and returns it as the SSE response body. The
+spawned tool future from `service.rs:763` reaches its `sink.send(response)`
+via an unbounded mpsc — which never errors. When the client TCP-closes
+the SSE response, axum/hyper drop the response body, but:
+
+- The mpsc channel keeps accepting the eventual `response` write.
+- The serve loop has no signal that the response can no longer be
+  delivered to the client.
+- Neither of the two `local_ct_pool.remove(id)` branches above is
+  reached on TCP close.
+
+The result is a zombie tool future that runs to natural completion.
 
 ### Possible directions
 
 I am not requesting a specific implementation — just flagging two
-shapes that look plausible from the outside:
+shapes that look plausible from the code walk above:
 
-1. **Bind `RequestContext::ct` to the SSE response body's `Drop`.**
-   Wrap the response body in a guard whose `Drop` impl calls
-   `token.cancel()`. SSE keep-alive (`sse_keep_alive`, default 15s)
-   becomes the disconnect-detection probe — disconnect latency is
-   bounded by that interval. Handlers that already `select!` against
-   `RequestContext::ct` need no changes. For stateless / single-JSON
-   mode without SSE, a periodic zero-byte chunk could serve as the probe.
+1. **Drive a synthetic `notifications/cancelled` into the serve loop
+   when the SSE response body is dropped.** The existing serve-loop
+   path at `service.rs:781-817` already handles inbound cancellation
+   notifications and fires `local_ct_pool.remove(id).cancel()`. If the
+   SSE response body in `streamable_http_server` is wrapped in a guard
+   whose `Drop` impl pushes a synthetic `CancelledNotification` for the
+   in-flight `request_id` back through the session's input side, the
+   existing cancellation path activates with no new public surface.
+   SSE keep-alive (`sse_keep_alive`, default 15s) is the disconnect-
+   detection probe, so disconnect latency is bounded by that interval.
+   Handlers that already `select!` against `RequestContext::ct` need no
+   changes. For stateless / `json_response` mode, a periodic zero-byte
+   chunk or an internal `oneshot::Sender` watcher on the response body
+   could serve as the probe.
 
-2. **Explicit `SessionManager::cancel_in_flight(session_id)` hook**,
-   called from the existing session-close path. More explicit but
-   doesn't solve TCP-disconnect-without-DELETE on its own; needs (1)
-   or similar to detect.
+2. **Bind `request_ct` to the SSE response body's `Drop` directly.**
+   Same idea but reaching into the serve-loop internals: expose a
+   `cancel_request(request_id)` hook on `SessionManager`, called from
+   the response body's Drop. More explicit, but adds a new public method
+   to every `SessionManager` implementor.
 
 Happy to PR (1) if maintainers prefer that direction.
 
@@ -171,19 +301,41 @@ guard fires too late to actually abort the work.
 
 ## Filing checklist
 
-Hold filing until all of the following are checked:
+Status of the original 6 items:
 
-- [ ] Minimal repro above actually built and run against rmcp 0.8.5;
-      paste exact log lines into the issue body
-- [ ] Behavior verified against rmcp `main` (may already be fixed)
-- [ ] Read `streamable_http_server/tower.rs` + `session/local.rs` end
-      to end; attach a more specific code pointer to the "Conjecture
-      on root cause" section
-- [ ] Cross-check stdio transport behavior to confirm the "stdio works
-      correctly" claim
-- [ ] Confirm whether `sse_keep_alive` is observable from
-      `StreamableHttpServerConfig` in a way that a contributor PR could
-      hook into without breaking changes
+- [x] Minimal repro above actually built and run against rmcp 0.8.5;
+      exact log lines now embedded in "Observed" — **DONE**
+      (2026-05-19 17:22-17:23 UTC, repro source at
+      `/tmp/rmcp-disconnect-repro/`, full server log at
+      `/tmp/repro_server.clean.log`).
+- [x] Behavior verified against rmcp `main` (`rmcp-v1.7.0` /
+      `cd2f5f1`) — **code-walk only**; same `local_ct_pool` design,
+      same two-fire-site pattern; new `cancellation_token` config field
+      is server-wide not per-request. Runtime verification against
+      `main` still pending (would need a git-dep override).
+- [x] Read `streamable_http_server/tower.rs` + `session/local.rs` end
+      to end — **DONE**; exact line refs now in "Root cause" section.
+- [x] Cross-check stdio transport behavior — **DONE via code walk**.
+      Original claim that "stdio works correctly" was overconfident;
+      revised to describe the practical mitigation (operators drop
+      `RunningService` on stdin EOF, which fires the DropGuard cascade)
+      rather than transport-level fix. Lab verification still useful.
+- [x] Confirm `sse_keep_alive` is observable — **DONE**. Public field
+      on `StreamableHttpServerConfig` in both 0.8.5 (default 15s) and
+      `main` (with builder `with_sse_keep_alive`). Contributor PR can
+      use it without breaking changes.
 - [ ] Strip our company-specific framing if filing as a personal issue;
       or keep the RustJunosMCP cross-link if filing on behalf of the
-      project
+      project — **deferred until filing decision**
+
+Remaining blockers before filing:
+
+1. ~~Build the minimal repro~~ — **done**; 281 polls past disconnect
+   captured.
+2. (Optional but cheap) re-run the same repro against rmcp `main` with
+   a git dep to confirm the same behavior. Recommended but not strictly
+   required given the code walk evidence.
+3. Decide identity for filing (project vs personal); strip company
+   framing if personal.
+4. Polish the issue body for upstream tone (drop the "I'm not requesting
+   a specific implementation" hedge once we're confident in option 1).
