@@ -58,6 +58,19 @@ struct UpgradeAuditGuard {
 
 impl Drop for UpgradeAuditGuard {
     fn drop(&mut self) {
+        // #44: confirm whether the rmcp streamable-HTTP transport actually
+        // drops the in-flight future on client disconnect (vs. detaching it).
+        // Fires on every drop, regardless of `consumed`, so we can correlate
+        // with the journal during a live destructive `upgrade_junos` interrupt.
+        // Uses INFO so it appears at default log level; the message string
+        // deliberately omits the token "audit" so the `silent_when_consumed_true`
+        // unit test still passes.
+        tracing::info!(
+            tool = "upgrade_junos",
+            router = %self.router,
+            consumed = self.consumed,
+            "upgrade_junos.drop_diag: guard dropped"
+        );
         if self.consumed {
             return;
         }
@@ -543,6 +556,18 @@ impl JmcpHandler {
         let router = args.router_name.clone();
         let basename = args.source_path.clone();
         let target_version = args.target_version.clone();
+        // #44 diagnostic: confirm handler entry — proves the future ran far
+        // enough to construct the guard. If this fires but the drop diagnostic
+        // does not, the future is being detached/leaked by the rmcp transport
+        // (not dropped) on client disconnect.
+        tracing::info!(
+            tool = "upgrade_junos",
+            token = %token,
+            router = %router,
+            basename = %basename,
+            target_version = %target_version,
+            "upgrade_junos.entry_diag: handler entered, constructing guard"
+        );
         // Cancellation guard: if the rmcp HTTP transport drops this future
         // mid-flight (e.g. client read timeout, ctrl-C, network reset),
         // `guard` is dropped without `consumed = true`, so its `Drop`
