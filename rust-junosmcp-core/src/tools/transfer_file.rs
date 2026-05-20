@@ -820,12 +820,19 @@ pub struct ScpOutcome {
 
 #[async_trait::async_trait]
 pub trait ScpRunner: Send + Sync {
-    /// Run the SCP job, racing against `ct.cancelled()`. On cancel,
+    /// Run the SCP upload job, racing against `ct.cancelled()`. On cancel,
     /// production impls MUST kill the underlying child process (or
     /// otherwise abort the work) and return
     /// `std::io::Error::new(ErrorKind::Interrupted, "cancelled")` so
     /// the caller can map it to `JmcpError::Cancelled`.
     async fn run(&self, job: &ScpJob, ct: &CancellationToken) -> std::io::Result<ScpOutcome>;
+
+    /// Run the SCP download job. Same cancellation contract as `run()`.
+    async fn fetch(
+        &self,
+        job: &ScpFetchJob,
+        ct: &CancellationToken,
+    ) -> std::io::Result<ScpOutcome>;
 }
 
 /// Production runner — shells out to `scp` from system openssh-client.
@@ -865,6 +872,43 @@ impl ScpRunner for OpenSshScpRunner {
             stderr: String::from_utf8_lossy(&se).into_owned(),
         })
     }
+
+    async fn fetch(
+        &self,
+        job: &ScpFetchJob,
+        ct: &CancellationToken,
+    ) -> std::io::Result<ScpOutcome> {
+        let argv = build_scp_fetch_argv(job);
+        use tokio::io::AsyncReadExt;
+        let mut child = tokio::process::Command::new("scp")
+            .args(&argv)
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        let mut stdout_pipe = child.stdout.take().expect("piped");
+        let mut stderr_pipe = child.stderr.take().expect("piped");
+        let status = tokio::select! {
+            biased;
+            _ = ct.cancelled() => {
+                tracing::info!(pid = ?child.id(), "fetch_file.scp_diag phase=\"cancelled\": killing scp child");
+                let _ = child.start_kill();
+                // Reap so we don't leak a zombie in the process table.
+                let _ = child.wait().await;
+                return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"));
+            }
+            s = child.wait() => s?,
+        };
+        let mut so = Vec::new();
+        let mut se = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut so).await;
+        let _ = stderr_pipe.read_to_end(&mut se).await;
+        Ok(ScpOutcome {
+            exit_code: status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&so).into_owned(),
+            stderr: String::from_utf8_lossy(&se).into_owned(),
+        })
+    }
 }
 
 /// Test double that records calls and returns canned outcomes.
@@ -872,6 +916,7 @@ impl ScpRunner for OpenSshScpRunner {
 pub struct MockScpRunner {
     pub outcome: ScpOutcome,
     pub calls: tokio::sync::Mutex<Vec<Vec<String>>>,
+    pub fetch_calls: tokio::sync::Mutex<Vec<Vec<String>>>,
     /// When `Some`, the runner sleeps this long (cancel-aware) before
     /// returning the outcome. Used by cancellation tests to assert the
     /// SCP call observes a mid-flight cancel.
@@ -888,6 +933,7 @@ impl MockScpRunner {
                 stderr: String::new(),
             },
             calls: tokio::sync::Mutex::new(Vec::new()),
+            fetch_calls: tokio::sync::Mutex::new(Vec::new()),
             delay: None,
         })
     }
@@ -895,6 +941,7 @@ impl MockScpRunner {
         std::sync::Arc::new(Self {
             outcome: o,
             calls: tokio::sync::Mutex::new(Vec::new()),
+            fetch_calls: tokio::sync::Mutex::new(Vec::new()),
             delay: None,
         })
     }
@@ -908,6 +955,7 @@ impl MockScpRunner {
                 stderr: String::new(),
             },
             calls: tokio::sync::Mutex::new(Vec::new()),
+            fetch_calls: tokio::sync::Mutex::new(Vec::new()),
             delay: Some(d),
         })
     }
@@ -918,6 +966,24 @@ impl MockScpRunner {
 impl ScpRunner for MockScpRunner {
     async fn run(&self, job: &ScpJob, ct: &CancellationToken) -> std::io::Result<ScpOutcome> {
         self.calls.lock().await.push(build_scp_argv(job));
+        if let Some(d) = self.delay {
+            tokio::select! {
+                biased;
+                _ = ct.cancelled() => {
+                    return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"));
+                }
+                _ = tokio::time::sleep(d) => {}
+            }
+        }
+        Ok(self.outcome.clone())
+    }
+
+    async fn fetch(
+        &self,
+        job: &ScpFetchJob,
+        ct: &CancellationToken,
+    ) -> std::io::Result<ScpOutcome> {
+        self.fetch_calls.lock().await.push(build_scp_fetch_argv(job));
         if let Some(d) = self.delay {
             tokio::select! {
                 biased;
@@ -985,6 +1051,28 @@ mod runner_tests {
             .expect("runner should return well within 500ms after cancel");
         let err = r.expect_err("expected Interrupted error");
         assert_eq!(err.kind(), std::io::ErrorKind::Interrupted, "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn mock_fetch_records_argv_for_assertion() {
+        let runner = MockScpRunner::ok();
+        let job = ScpFetchJob {
+            private_key_path: "/k".into(),
+            known_hosts_file: "/etc/jmcp/known_hosts".into(),
+            username: "root".into(),
+            host: "10.0.0.1".into(),
+            port: 22,
+            remote_path: "/var/tmp/foo.tgz".into(),
+            local_path: "/var/lib/jmcp/staging/foo.tgz".into(),
+            accept_new_host_keys: false,
+        };
+        let ct = CancellationToken::new();
+        let out = runner.fetch(&job, &ct).await.unwrap();
+        assert_eq!(out.exit_code, 0);
+        let calls = runner.fetch_calls.lock().await;
+        assert_eq!(calls.len(), 1);
+        // -O appears first in fetch argv, exactly as in upload argv.
+        assert_eq!(calls[0][0], "-O");
     }
 }
 
