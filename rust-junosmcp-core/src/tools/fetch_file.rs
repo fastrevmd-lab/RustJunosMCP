@@ -9,8 +9,8 @@ use crate::device_manager::DeviceManager;
 use crate::error::JmcpError;
 use crate::inventory::AuthConfig;
 use crate::tools::transfer_file::{
-    hex32, parse_checksum_output, scrub_scp_stderr, sha256_file_cancellable,
-    validate_source_basename, ScpFetchJob, TransferConfig,
+    hex32, parse_checksum_output, sha256_file_cancellable, validate_source_basename, ScpFetchJob,
+    TransferConfig,
 };
 use crate::tools::FetchFileArgs;
 use serde_json::{json, Value};
@@ -182,16 +182,11 @@ pub async fn handle(
         })?;
         if outcome.exit_code != 0 {
             let _ = std::fs::remove_file(&partial_path);
-            if outcome.exit_code == 255
-                && (outcome.stderr.contains("Connection timed out")
-                    || outcome.stderr.contains("No route to host"))
-            {
-                return Err(JmcpError::ConnectTimeout(args.router_name.clone()));
-            }
-            return Err(JmcpError::ScpFailed {
-                exit_code: outcome.exit_code,
-                stderr: scrub_scp_stderr(&outcome.stderr),
-            });
+            return Err(crate::tools::transfer_file::classify_scp_failure(
+                &outcome,
+                &args.router_name,
+                &cfg.known_hosts_file,
+            ));
         }
 
         // Post-fetch local hash + verify (reads from partial_path).
