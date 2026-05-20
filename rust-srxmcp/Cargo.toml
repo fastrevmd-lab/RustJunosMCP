@@ -1,0 +1,43 @@
+[package]
+name        = "rust-srxmcp"
+version     = "0.0.1"
+edition.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+authors.workspace     = true
+description = "MCP server for Juniper SRX-specific operational workflows."
+
+[[bin]]
+name = "rust-srxmcp"
+path = "src/main.rs"
+
+[lib]
+name = "rust_srxmcp"
+path = "src/lib.rs"
+
+[dependencies]
+rust-junosmcp-core = { path = "../rust-junosmcp-core" }
+rust-junosmcp-auth = { path = "../rust-junosmcp-auth" }
+rust-srxmcp-core   = { path = "../rust-srxmcp-core" }
+tokio              = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+tracing            = { workspace = true }
+anyhow             = { workspace = true }
+thiserror          = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+rmcp = { version = "0.8", features = [
+    "server",
+    "macros",
+    "transport-io",
+    "schemars",
+    "transport-streamable-http-server",
+] }
+schemars           = { workspace = true }
+arc-swap           = { workspace = true }
+axum               = { workspace = true }
+tower              = { workspace = true }
+http               = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
