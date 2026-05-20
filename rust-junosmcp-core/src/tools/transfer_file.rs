@@ -910,7 +910,7 @@ impl ScpRunner for OpenSshScpRunner {
 
 /// Test double that records calls and returns canned outcomes.
 #[cfg(test)]
-pub struct MockScpRunner {
+pub(crate) struct MockScpRunner {
     pub outcome: ScpOutcome,
     pub calls: tokio::sync::Mutex<Vec<Vec<String>>>,
     pub fetch_calls: tokio::sync::Mutex<Vec<Vec<String>>>,

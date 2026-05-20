@@ -125,6 +125,12 @@ pub async fn handle(
         };
 
         // Idempotent skip / local-conflict check.
+        // SECURITY: there is a TOCTOU window between the metadata check below
+        // and scp opening the partial file at `local_path.with_extension("partial")`.
+        // The threat model assumes the staging dir is jmcp-owned with mode 0700,
+        // so no unprivileged process can swap inodes inside this window. If a
+        // future change relaxes those staging-dir permissions, this becomes a
+        // real symlink/race vulnerability — consider an O_NOFOLLOW open instead.
         if let Ok(meta) = std::fs::symlink_metadata(&local_path) {
             if meta.file_type().is_symlink() {
                 return Err(JmcpError::BadSourcePath(format!(
@@ -218,10 +224,140 @@ pub async fn handle(
 }
 
 #[cfg(test)]
-mod handle_tests {
+mod handle_validation_tests {
+    use super::*;
+    use crate::inventory::Inventory;
+    use crate::tools::transfer_file::{MockScpRunner, TransferLocks};
+    use std::io::Write;
+
+    fn cfg(dir: &std::path::Path) -> TransferConfig {
+        TransferConfig {
+            staging_dir: dir.to_path_buf(),
+            known_hosts_file: "/etc/jmcp/known_hosts".into(),
+            scp_runner: MockScpRunner::ok(),
+            transfer_locks: Arc::new(TransferLocks::default()),
+            // Tests don't provide a real known_hosts file; opt into TOFU
+            // so the v0.5.2 pre-check (`KnownHostsMissing`) doesn't short-
+            // circuit them. A dedicated test below asserts that strict-mode
+            // + missing known_hosts fails closed.
+            accept_new_host_keys: true,
+        }
+    }
+
+    fn build_inv(json: &str) -> Arc<Inventory> {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(json.as_bytes()).unwrap();
+        Arc::new(Inventory::load(f.path()).unwrap())
+    }
+
     #[tokio::test]
-    #[ignore = "needs fake-device helper from Task 6"]
-    async fn fetches_emits_skipped_when_local_matches_remote() {
-        // placeholder
+    async fn rejects_bad_remote_basename() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = build_inv(
+            r#"{"r1":{"ip":"127.0.0.1","username":"u",
+                     "auth":{"type":"password","password":"x"}}}"#,
+        );
+        let dm = Arc::new(DeviceManager::new(inv));
+        let r = handle(
+            FetchFileArgs {
+                router_name: "r1".into(),
+                remote_path: "../etc/shadow".into(),
+                local_name: None,
+                force: false,
+                verify: true,
+                timeout: 5,
+            },
+            dm,
+            cfg(dir.path()),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(r, Err(JmcpError::BadSourcePath(_))), "got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn rejects_bad_local_name_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = build_inv(
+            r#"{"r1":{"ip":"127.0.0.1","username":"u",
+                     "auth":{"type":"password","password":"x"}}}"#,
+        );
+        let dm = Arc::new(DeviceManager::new(inv));
+        let r = handle(
+            FetchFileArgs {
+                router_name: "r1".into(),
+                remote_path: "ok.tgz".into(),
+                local_name: Some("../escape".into()),
+                force: false,
+                verify: true,
+                timeout: 5,
+            },
+            dm,
+            cfg(dir.path()),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(r, Err(JmcpError::BadSourcePath(_))), "got {r:?}");
+    }
+
+    /// Strict mode (`accept_new_host_keys=false`) must fail closed when the
+    /// configured `known_hosts_file` is missing or not a regular file.
+    #[tokio::test]
+    async fn strict_mode_rejects_missing_known_hosts() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = build_inv(
+            r#"{"r1":{"ip":"127.0.0.1","username":"u",
+                     "auth":{"type":"password","password":"x"}}}"#,
+        );
+        let dm = Arc::new(DeviceManager::new(inv));
+        let mut c = cfg(dir.path());
+        c.accept_new_host_keys = false;
+        c.known_hosts_file = dir.path().join("no-such-known_hosts");
+        let r = handle(
+            FetchFileArgs {
+                router_name: "r1".into(),
+                remote_path: "ok.tgz".into(),
+                local_name: None,
+                force: false,
+                verify: true,
+                timeout: 5,
+            },
+            dm,
+            c,
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(r, Err(JmcpError::KnownHostsMissing(_))),
+            "expected KnownHostsMissing in strict mode, got {r:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_password_auth_with_unsupported_auth() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = build_inv(
+            r#"{"r1":{"ip":"127.0.0.1","username":"u",
+                     "auth":{"type":"password","password":"x"}}}"#,
+        );
+        let dm = Arc::new(DeviceManager::new(inv));
+        let r = handle(
+            FetchFileArgs {
+                router_name: "r1".into(),
+                remote_path: "ok.tgz".into(),
+                local_name: None,
+                force: false,
+                verify: true,
+                timeout: 5,
+            },
+            dm,
+            cfg(dir.path()),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(r, Err(JmcpError::UnsupportedAuth(_))),
+            "expected UnsupportedAuth, got {r:?}"
+        );
     }
 }
