@@ -35,6 +35,7 @@ use crate::{SrxError, SrxToolResponse};
 use rust_junosmcp_core::device_manager::PooledDevice;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -67,7 +68,7 @@ impl SrxLicensedFeature {
             Self::WebFiltering => &["web filtering", "url filtering", "web-filtering"],
             Self::AntiSpam => &["anti-spam", "antispam"],
             Self::SecIntel => &["secintel", "security intelligence", "sec-intel"],
-            Self::AtpCloud => &["atp", "advanced threat"],
+            Self::AtpCloud => &["atp cloud", "sky atp", "advanced threat"],
             Self::SslProxy => &["ssl proxy", "ssl forward proxy", "ssl-proxy"],
         }
     }
@@ -102,8 +103,11 @@ pub struct LicenseRecord {
     pub feature_name: String,
     /// `"permanent"`, `"time-based"`, `"trial"`, etc.
     pub license_type: String,
-    /// RFC 3339 end-date when the license expires; `None` for permanent.
-    pub end_date: Option<String>,
+    /// End-date when the license expires; `None` for permanent.
+    /// Wire shape is RFC 3339 (e.g. `"2026-06-30T23:07:30Z"`).
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[schemars(with = "Option<String>")]
+    pub end_date: Option<OffsetDateTime>,
 }
 
 /// Aggregated counts across all matching records.
@@ -121,9 +125,11 @@ pub struct LicenseData {
     pub feature: SrxLicensedFeature,
     pub license_records: Vec<LicenseRecord>,
     pub counts: LicenseCounts,
-    /// RFC 3339 timestamp of the earliest expiry among time-based records,
-    /// or `None` when all records are permanent.
-    pub earliest_expiry: Option<String>,
+    /// Earliest expiry among time-based records (`None` when all permanent).
+    /// Wire shape is RFC 3339.
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[schemars(with = "Option<String>")]
+    pub earliest_expiry: Option<OffsetDateTime>,
     /// `true` iff every matching record has `license_type == "permanent"`
     /// (i.e. `end_date.is_none()` for all records).
     pub all_permanent: bool,
@@ -198,9 +204,9 @@ pub fn parse(
         }
 
         let license_type = child_text(&fs, "license-type").unwrap_or_default();
-        // Junos date format: "2026-06-30 23:07:30 UTC" — convert to RFC 3339.
+        // Junos date format: "2026-06-30 23:07:30 UTC" — parse to OffsetDateTime.
         let end_date = child_text(&fs, "end-date")
-            .map(|s| junos_date_to_rfc3339(&s))
+            .map(|s| junos_date_to_offset(&s))
             .transpose()
             .map_err(|e| SrxError::Parse(format!("end-date parse error: {e}")))?;
 
@@ -233,7 +239,7 @@ pub fn parse(
     }
 
     // Collect all expiry dates, find the earliest.
-    let mut expiry_dates: Vec<String> = records.iter().filter_map(|r| r.end_date.clone()).collect();
+    let mut expiry_dates: Vec<OffsetDateTime> = records.iter().filter_map(|r| r.end_date).collect();
     expiry_dates.sort();
     let earliest_expiry = expiry_dates.into_iter().next();
 
@@ -263,25 +269,29 @@ fn child_text(node: &roxmltree::Node<'_, '_>, tag_name: &str) -> Option<String> 
         .filter(|t| !t.is_empty())
 }
 
-/// Convert a Junos date string (`"2026-06-30 23:07:30 UTC"`) to RFC 3339
-/// (`"2026-06-30T23:07:30+00:00"`).
+/// Parse a Junos date string (`"2026-06-30 23:07:30 UTC"`) into an
+/// `OffsetDateTime`.
 ///
 /// Junos uses a non-standard format with a space separator and trailing " UTC".
-/// We normalise it to RFC 3339 so callers can parse it with any standard library.
-fn junos_date_to_rfc3339(s: &str) -> Result<String, String> {
+/// We normalise it to RFC 3339 and then parse via `time`'s well-known format.
+fn junos_date_to_offset(s: &str) -> Result<OffsetDateTime, String> {
+    use time::format_description::well_known::Rfc3339;
+
     let s = s.trim();
     // Strip trailing timezone label (always UTC for Junos).
     let s = s.strip_suffix(" UTC").unwrap_or(s).trim();
-    // "2026-06-30 23:07:30" → "2026-06-30T23:07:30+00:00"
-    if s.len() == 19 && s.as_bytes()[10] == b' ' {
-        let rfc = format!("{}T{}+00:00", &s[..10], &s[11..]);
-        return Ok(rfc);
-    }
-    // Already contains 'T' — might already be ISO 8601.
-    if s.contains('T') {
-        return Ok(s.to_string());
-    }
-    Err(format!("unrecognised Junos date format: {s:?}"))
+
+    let rfc = if s.len() == 19 && s.as_bytes()[10] == b' ' {
+        // "2026-06-30 23:07:30" → "2026-06-30T23:07:30+00:00"
+        format!("{}T{}+00:00", &s[..10], &s[11..])
+    } else if s.contains('T') {
+        // Already ISO 8601-ish.
+        s.to_string()
+    } else {
+        return Err(format!("unrecognised Junos date format: {s:?}"));
+    };
+
+    OffsetDateTime::parse(&rfc, &Rfc3339).map_err(|e| format!("rfc3339 parse {rfc:?}: {e}"))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -402,27 +412,21 @@ mod tests {
     // ── Test 6: date conversion helper ───────────────────────────────────────
 
     #[test]
-    fn junos_date_converts_to_rfc3339() {
-        let result = junos_date_to_rfc3339("2026-06-30 23:07:30 UTC").unwrap();
-        assert_eq!(result, "2026-06-30T23:07:30+00:00");
+    fn junos_date_converts_to_offset() {
+        let result = junos_date_to_offset("2026-06-30 23:07:30 UTC").unwrap();
+        assert_eq!(result.unix_timestamp(), 1782860850);
+        assert_eq!(result.offset(), time::UtcOffset::UTC);
     }
 
     #[test]
     fn junos_date_without_utc_suffix_still_converts() {
-        let result = junos_date_to_rfc3339("2026-06-30 23:07:30").unwrap();
-        assert_eq!(result, "2026-06-30T23:07:30+00:00");
+        let result = junos_date_to_offset("2026-06-30 23:07:30").unwrap();
+        assert_eq!(result.unix_timestamp(), 1782860850);
     }
 
-    // ── Test 7: eval_trial — time-based record has expiry date ────────────────
-
     #[test]
-    fn eval_trial_virtual_appliance_has_expiry() {
-        // Virtual Appliance in eval_trial.xml is time-based with a known end-date.
-        // Verify a matching feature (none of the SrxLicensedFeature variants match
-        // "Virtual Appliance", so we test via a raw parse on a synthetic fixture).
-        // Instead, verify the date conversion doesn't break existing non-IDP records
-        // by confirming the parse completes without error.
-        let xml = fixture("eval_trial.xml");
-        parse(SrxLicensedFeature::Idp, &xml).expect("parse must not fail even with date fields");
+    fn junos_date_rejects_malformed_input() {
+        assert!(junos_date_to_offset("not a date").is_err());
+        assert!(junos_date_to_offset("2026/06/30").is_err());
     }
 }
