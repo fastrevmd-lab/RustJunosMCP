@@ -68,7 +68,11 @@ pub struct VpnLifecycleArgs {
     /// Filter IKE and IPsec SAs to those whose remote address contains this substring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer: Option<String>,
-    /// Filter IPsec SAs to those whose tunnel name contains this substring.
+    /// Filter IPsec SAs to those whose **remote gateway** address contains this
+    /// substring. The brief-style IPsec RPC does not surface the st0 interface
+    /// name, so this is effectively a second peer-substring filter; it remains
+    /// distinct from `peer` so that callers can express tunnel-vs-IKE-only
+    /// intent independently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tunnel: Option<String>,
     #[serde(default)]
@@ -78,7 +82,9 @@ pub struct VpnLifecycleArgs {
 /// One IKE Phase-1 security association.
 #[derive(Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct IkeSa {
-    pub index: u64,
+    /// IKE SA index. `None` when Junos omits or returns a non-numeric value
+    /// — distinguishes "field absent" from a legitimate index of 0.
+    pub index: Option<u64>,
     /// Remote peer IP address.
     pub remote_address: String,
     /// SA state: "UP", "DOWN", "INITIATING", etc.
@@ -97,7 +103,9 @@ pub struct IkeSa {
 /// One IPsec Phase-2 security association (one direction).
 #[derive(Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct IpsecSa {
-    pub tunnel_id: u32,
+    /// IPsec tunnel id (one per pair). `None` when Junos omits or returns a
+    /// non-numeric value — distinguishes "field absent" from a legitimate id of 0.
+    pub tunnel_id: Option<u32>,
     /// Traffic direction: "<" (inbound) or ">" (outbound).
     pub direction: String,
     /// Remote gateway IP address.
@@ -115,7 +123,11 @@ pub struct IpsecSa {
 /// Correlation between one IKE SA and its associated IPsec SAs (by remote address).
 #[derive(Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct VpnCorrelation {
-    pub ike_sa_index: u64,
+    /// IKE SA index. `None` when the source IKE SA's index was absent or
+    /// unparseable.
+    pub ike_sa_index: Option<u64>,
+    /// Tunnel ids of correlated IPsec SAs, deduplicated. Only known
+    /// (`Some(u32)`) tunnel ids appear here.
     pub ipsec_sa_tunnel_ids: Vec<u32>,
 }
 
@@ -192,8 +204,8 @@ pub fn parse_combined(
     // Strip undeclared junos: namespace attributes before any XML parsing.
     // rustez strips the <nc:rpc-reply> wrapper (which declared xmlns:junos),
     // leaving orphaned junos:style="…" attributes that roxmltree rejects.
-    let ike_clean = strip_junos_ns_attrs(ike_xml);
-    let ipsec_clean = strip_junos_ns_attrs(ipsec_xml);
+    let ike_clean = crate::xml::sanitize_rustez_xml(ike_xml);
+    let ipsec_clean = crate::xml::sanitize_rustez_xml(ipsec_xml);
     let ike_xml = ike_clean.as_ref();
     let ipsec_xml = ipsec_clean.as_ref();
 
@@ -254,7 +266,7 @@ pub fn parse_ike(xml: &str) -> Result<Vec<IkeSa>, SrxError> {
         return Ok(Vec::new());
     }
 
-    let cleaned = strip_junos_ns_attrs(xml);
+    let cleaned = crate::xml::sanitize_rustez_xml(xml);
     let doc = roxmltree::Document::parse(&cleaned)
         .map_err(|e| SrxError::Parse(format!("IKE xml parse: {e}")))?;
 
@@ -273,12 +285,11 @@ pub fn parse_ike(xml: &str) -> Result<Vec<IkeSa>, SrxError> {
             .map(|t| t.trim().to_string())
             .unwrap_or_default();
 
-        let index: u64 = block
+        let index: Option<u64> = block
             .children()
             .find(|n| n.is_element() && n.tag_name().name() == "ike-sa-index")
             .and_then(|n| n.text())
-            .and_then(|t| t.trim().parse().ok())
-            .unwrap_or(0);
+            .and_then(|t| t.trim().parse().ok());
 
         let gateway_name: Option<String> = block
             .children()
@@ -325,7 +336,7 @@ pub fn parse_ipsec(xml: &str) -> Result<Vec<IpsecSa>, SrxError> {
         return Ok(Vec::new());
     }
 
-    let cleaned = strip_junos_ns_attrs(xml);
+    let cleaned = crate::xml::sanitize_rustez_xml(xml);
     let doc = roxmltree::Document::parse(&cleaned)
         .map_err(|e| SrxError::Parse(format!("IPsec xml parse: {e}")))?;
 
@@ -342,10 +353,9 @@ pub fn parse_ipsec(xml: &str) -> Result<Vec<IpsecSa>, SrxError> {
             .filter(|n| n.is_element() && n.tag_name().name() == "ipsec-security-associations")
         {
             let direction = child_text(&sa_node, "sa-direction").unwrap_or_default();
-            let tunnel_id: u32 = child_text(&sa_node, "sa-tunnel-index")
+            let tunnel_id: Option<u32> = child_text(&sa_node, "sa-tunnel-index")
                 .as_deref()
-                .and_then(|t| t.parse().ok())
-                .unwrap_or(0);
+                .and_then(|t| t.parse().ok());
             let spi = child_text(&sa_node, "sa-spi").unwrap_or_default();
             let gateway = child_text(&sa_node, "sa-remote-gateway").unwrap_or_default();
 
@@ -393,10 +403,11 @@ fn correlate(ike_sas: &[IkeSa], ipsec_sas: &[IpsecSa]) -> Vec<VpnCorrelation> {
             let ipsec_ids: Vec<u32> = ipsec_sas
                 .iter()
                 .filter(|ipc| ipc.gateway == ike.remote_address)
+                .filter_map(|ipc| ipc.tunnel_id)
                 // Deduplicate tunnel_ids (inbound and outbound share the same id).
-                .fold(Vec::<u32>::new(), |mut acc, ipc| {
-                    if !acc.contains(&ipc.tunnel_id) {
-                        acc.push(ipc.tunnel_id);
+                .fold(Vec::<u32>::new(), |mut acc, id| {
+                    if !acc.contains(&id) {
+                        acc.push(id);
                     }
                     acc
                 });
@@ -409,238 +420,6 @@ fn correlate(ike_sas: &[IkeSa], ipsec_sas: &[IpsecSa]) -> Vec<VpnCorrelation> {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// Sanitize a raw XML string returned by `rustez` so that `roxmltree` can parse it.
-///
-/// Two problems are fixed:
-///
-/// 1. **Undeclared namespace attributes** (`junos:style="brief"`):
-///    `rustez` strips the `<nc:rpc-reply>` wrapper where `xmlns:junos` was declared,
-///    leaving orphaned `junos:*` attributes that roxmltree rejects. These are removed.
-///
-/// 2. **Unescaped `<` / `>` in text content**:
-///    `rustnetconf::extract_rpc_reply_inner_content` calls `text.unescape()` when
-///    reconstructing the inner XML, so `&lt;` / `&gt;` in element text (e.g.
-///    `<sa-direction>`) become raw `<` / `>`. roxmltree rejects these. They are
-///    re-escaped via a two-pass substitution that preserves XML markup.
-///
-/// This function is pure text manipulation — no XML parser is invoked.
-fn strip_junos_ns_attrs(xml: &str) -> std::borrow::Cow<'_, str> {
-    // Fast path: if neither problem is present, return the input unchanged.
-    let needs_ns_strip = xml.contains("junos:");
-    // Detect unescaped `<` or `>` in text content: rustnetconf's inner-content
-    // extractor decodes `&lt;` / `&gt;` entity references (calls text.unescape()),
-    // so `<sa-direction>&lt;</sa-direction>` becomes `<sa-direction><</sa-direction>`
-    // in the returned string. We detect this by looking for bare angle brackets
-    // that are NOT part of an XML tag (i.e. not preceded by `<` for a start tag
-    // or `</` for an end tag, and not followed by `/` or a letter).
-    let needs_text_escape =
-        xml.bytes().any(|b| b == b'<' || b == b'>') && has_bare_angle_brackets_in_text(xml);
-    if !needs_ns_strip && !needs_text_escape {
-        return std::borrow::Cow::Borrowed(xml);
-    }
-
-    // Apply fixes with pure text manipulation (no XML parser invoked here).
-    // Step 1: strip junos: attributes.
-    let after_ns = if needs_ns_strip {
-        simple_strip_junos(xml)
-    } else {
-        xml.to_string()
-    };
-
-    // Step 2: escape bare `<` and `>` in text content.
-    let result = if needs_text_escape {
-        escape_text_angle_brackets(&after_ns)
-    } else {
-        after_ns
-    };
-
-    std::borrow::Cow::Owned(result)
-}
-
-/// Return true if the string contains `<` or `>` characters that appear in
-/// text content (between element boundaries) rather than as part of XML markup.
-///
-/// Heuristic: scan the string byte-by-byte. Track whether we're inside a tag
-/// (`in_tag`). A `<` byte outside a tag is a bare angle bracket in text content,
-/// UNLESS it is immediately followed by `/`, `?`, `!`, or an ASCII letter/digit
-/// (which would make it a legitimate start tag or CDATA section opener).
-///
-/// A `>` byte outside a tag is also a bare angle bracket in text content.
-fn has_bare_angle_brackets_in_text(xml: &str) -> bool {
-    let bytes = xml.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    let mut in_tag = false;
-
-    while i < len {
-        let b = bytes[i];
-        if in_tag {
-            if b == b'>' {
-                in_tag = false;
-            }
-            i += 1;
-            continue;
-        }
-        // Not in a tag.
-        match b {
-            b'<' => {
-                // Check if this is a legitimate XML tag open.
-                let next = if i + 1 < len { bytes[i + 1] } else { 0 };
-                let is_tag = next == b'/'
-                    || next == b'?'
-                    || next == b'!'
-                    || next.is_ascii_alphanumeric()
-                    || next == b'_';
-                if is_tag {
-                    in_tag = true;
-                } else {
-                    return true; // bare `<` in text content
-                }
-            }
-            b'>' => {
-                // A `>` outside a tag is bare (it only makes sense inside a tag normally).
-                return true;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    false
-}
-
-/// Escape bare `<` and `>` characters that appear in text content of an XML string.
-///
-/// Scans the string for XML tag boundaries. Text segments (between `>` and `<`)
-/// have bare `<` replaced with `&lt;` and bare `>` replaced with `&gt;`. Markup
-/// (everything inside `<...>`) is passed through unchanged.
-fn escape_text_angle_brackets(xml: &str) -> String {
-    let mut out = String::with_capacity(xml.len() + 32);
-    let mut rest = xml;
-
-    // We alternate between "inside a tag" and "in text content".
-    // Start state: if the string begins with `<`, we're about to enter a tag.
-    let mut in_text = !xml.starts_with('<');
-
-    while !rest.is_empty() {
-        if in_text {
-            // Find the next `<` that starts a legitimate XML tag.
-            // Everything before it is text content; escape bare `<` and `>`.
-            if let Some(tag_start) = find_next_tag_start(rest) {
-                let text_segment = &rest[..tag_start];
-                // Escape bare angle brackets in this text segment.
-                // Note: text content should not contain `&lt;` already (rustnetconf
-                // decoded it), but we avoid double-escaping by checking.
-                for ch in text_segment.chars() {
-                    match ch {
-                        '<' => out.push_str("&lt;"),
-                        '>' => out.push_str("&gt;"),
-                        other => out.push(other),
-                    }
-                }
-                rest = &rest[tag_start..];
-                in_text = false;
-            } else {
-                // Rest is all text content.
-                for ch in rest.chars() {
-                    match ch {
-                        '<' => out.push_str("&lt;"),
-                        '>' => out.push_str("&gt;"),
-                        other => out.push(other),
-                    }
-                }
-                break;
-            }
-        } else {
-            // Inside a tag — find the closing `>` and pass through verbatim.
-            if let Some(tag_end) = rest.find('>') {
-                out.push_str(&rest[..=tag_end]);
-                rest = &rest[tag_end + 1..];
-                in_text = true;
-            } else {
-                // Unterminated tag — pass through rest verbatim.
-                out.push_str(rest);
-                break;
-            }
-        }
-    }
-    out
-}
-
-/// Find the byte offset of the next `<` that opens a legitimate XML tag.
-/// Returns `None` if no such `<` exists in `s`.
-fn find_next_tag_start(s: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    while i < len {
-        if bytes[i] == b'<' {
-            let next = if i + 1 < len { bytes[i + 1] } else { 0 };
-            if next == b'/'
-                || next == b'?'
-                || next == b'!'
-                || next.is_ascii_alphanumeric()
-                || next == b'_'
-            {
-                return Some(i);
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Fallback: simple text-only stripping of `junos:attr="value"` patterns
-/// when the quick_xml round-trip fails.
-fn simple_strip_junos(xml: &str) -> String {
-    let mut out = String::with_capacity(xml.len());
-    let mut rest = xml;
-    while let Some(pos) = rest.find("junos:") {
-        out.push_str(&rest[..pos]);
-        rest = &rest[pos..];
-        let attr_end = find_attr_end(rest);
-        rest = &rest[attr_end..];
-        rest = rest.trim_start_matches(' ');
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Find the end position of an XML attribute starting at `s` (e.g. `junos:style="detail"`).
-/// Returns the byte index of the first character after the attribute value closing quote.
-fn find_attr_end(s: &str) -> usize {
-    // s starts with e.g. `junos:style="detail" ` or `junos:style='detail'>`
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    // Skip past the attribute name (up to '=').
-    while i < len && bytes[i] != b'=' {
-        i += 1;
-    }
-    if i >= len {
-        return len;
-    }
-    i += 1; // skip '='
-    if i >= len {
-        return len;
-    }
-    let quote = bytes[i];
-    if quote != b'"' && quote != b'\'' {
-        // No quote — skip to next whitespace.
-        while i < len && !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' {
-            i += 1;
-        }
-        return i;
-    }
-    i += 1; // skip opening quote
-    while i < len && bytes[i] != quote {
-        i += 1;
-    }
-    if i < len {
-        i += 1; // skip closing quote
-    }
-    i
-}
 
 /// Return the trimmed text of the first direct child element matching `name`.
 fn child_text(node: &roxmltree::Node<'_, '_>, name: &str) -> Option<String> {
@@ -678,7 +457,7 @@ fn is_not_configured_xml(xml: &str) -> Result<bool, SrxError> {
         return Ok(false);
     }
 
-    let cleaned = strip_junos_ns_attrs(xml);
+    let cleaned = crate::xml::sanitize_rustez_xml(xml);
     let doc = roxmltree::Document::parse(&cleaned)
         .map_err(|e| SrxError::Parse(format!("roxmltree: {e}")))?;
 
@@ -791,7 +570,7 @@ mod tests {
         let sas = parse_ike(&xml).expect("parse_ike should succeed");
         assert_eq!(sas.len(), 1, "expected 1 IKE SA");
         let sa = &sas[0];
-        assert_eq!(sa.index, 3128619);
+        assert_eq!(sa.index, Some(3128619));
         assert_eq!(sa.remote_address, "192.168.1.161");
         assert_eq!(sa.state, "UP");
         assert_eq!(sa.mode, "IKEv2");
@@ -824,7 +603,7 @@ mod tests {
         assert_eq!(sas.len(), 2, "expected 2 IPsec SAs (inbound + outbound)");
 
         let inbound = sas.iter().find(|s| s.direction == "<").expect("inbound SA");
-        assert_eq!(inbound.tunnel_id, 131073);
+        assert_eq!(inbound.tunnel_id, Some(131073));
         assert_eq!(inbound.spi, "4ef526a8");
         assert_eq!(inbound.gateway, "192.168.1.161");
         assert_eq!(inbound.block_state, "up");
@@ -839,7 +618,7 @@ mod tests {
             .find(|s| s.direction == ">")
             .expect("outbound SA");
         assert_eq!(outbound.spi, "cb151b04");
-        assert_eq!(outbound.tunnel_id, 131073);
+        assert_eq!(outbound.tunnel_id, Some(131073));
     }
 
     #[test]
@@ -881,7 +660,7 @@ mod tests {
         assert_eq!(node.ike_sas.len(), 1, "1 IKE SA");
         assert_eq!(node.ipsec_sas.len(), 2, "2 IPsec SAs (in + out)");
         assert_eq!(node.correlations.len(), 1, "1 correlation");
-        assert_eq!(node.correlations[0].ike_sa_index, 3128619);
+        assert_eq!(node.correlations[0].ike_sa_index, Some(3128619));
         assert_eq!(node.correlations[0].ipsec_sa_tunnel_ids, vec![131073]);
     }
 
@@ -929,6 +708,26 @@ mod tests {
         assert_eq!(resp.state, SrxState::Active);
         let data = resp.data.unwrap();
         assert_eq!(data.nodes[0].ike_sas.len(), 1, "filter kept matching SA");
+    }
+
+    #[test]
+    fn combined_ike_up_ipsec_empty_correlation_has_no_tunnels() {
+        // Phase-1 up, Phase-2 down (rekeying / cleared / never installed).
+        // Correlation must still be present so consumers can flag the gap,
+        // but its tunnel-id list must be empty.
+        let ike_xml = fixture("ike_sa_up_test10.xml");
+        let ipsec_xml = fixture("ipsec_sa_empty_test16.xml");
+        let resp = parse_combined(&ike_xml, &ipsec_xml, None, None).expect("combined parse");
+        assert_eq!(resp.state, SrxState::Active);
+        let data = resp.data.unwrap();
+        let node = &data.nodes[0];
+        assert_eq!(node.ike_sas.len(), 1);
+        assert!(node.ipsec_sas.is_empty(), "phase 2 empty");
+        assert_eq!(node.correlations.len(), 1);
+        assert!(
+            node.correlations[0].ipsec_sa_tunnel_ids.is_empty(),
+            "no ipsec tunnels to correlate to"
+        );
     }
 
     #[test]

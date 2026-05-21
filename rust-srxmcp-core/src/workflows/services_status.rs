@@ -109,8 +109,11 @@ pub struct SecIntelInfo {
 
 #[derive(Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct AtpCloudInfo {
-    /// Whether at least one connection URL is configured.
-    pub enrolled: bool,
+    /// The configured AAMW/ATP-Cloud connection URL when present in the
+    /// `<aamw-status>` payload, otherwise `None`. Presence of `Active` state
+    /// already implies AAMW is enrolled; this field carries the destination.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_url: Option<String>,
 }
 
 // ── `run()` — async entry point ───────────────────────────────────────────────
@@ -361,12 +364,20 @@ pub fn parse_atp(xml: &str) -> SubServiceStatus<AtpCloudInfo> {
         );
     }
 
-    // <aamw-status> present → enrolled.
-    let enrolled = doc
+    // Locate <aamw-status>. If absent (empty reply / unexpected schema),
+    // treat as NotConfigured — Active without a status block carries no
+    // useful information.
+    let status_node = doc
         .descendants()
-        .any(|n| n.is_element() && n.tag_name().name() == "aamw-status");
+        .find(|n| n.is_element() && n.tag_name().name() == "aamw-status");
 
-    SubServiceStatus::active(AtpCloudInfo { enrolled })
+    let Some(status_node) = status_node else {
+        return SubServiceStatus::not_configured("aamw-status element absent");
+    };
+
+    let connection_url = child_text(&status_node, "aamw-connection-url");
+
+    SubServiceStatus::active(AtpCloudInfo { connection_url })
 }
 
 // ── XML helpers ───────────────────────────────────────────────────────────────
@@ -376,7 +387,10 @@ pub fn parse_atp(xml: &str) -> SubServiceStatus<AtpCloudInfo> {
 fn rpc_error_reason(doc: &roxmltree::Document<'_>) -> Option<String> {
     let root = doc.root_element();
 
-    let is_err = |n: roxmltree::Node<'_, '_>| matches!(n.tag_name().name(), "rpc-error" | "error");
+    // Match only `rpc-error` (the NETCONF standard tag name). A broader
+    // `"error"` match risks false positives on benign Junos payloads that
+    // include generic <error> elements (e.g. inside <aamw-errors>).
+    let is_err = |n: roxmltree::Node<'_, '_>| n.tag_name().name() == "rpc-error";
 
     let err_node: Option<roxmltree::Node<'_, '_>> = if is_err(root) {
         Some(root)
@@ -552,12 +566,32 @@ mod tests {
     }
 
     #[test]
-    fn atp_enrolled_is_active() {
+    fn atp_enrolled_surfaces_connection_url() {
         let xml = r#"<aamw-status>
 <aamw-connection-url>https://atp.example.com</aamw-connection-url>
 </aamw-status>"#;
         let r = parse_atp(xml);
         assert_eq!(r.state, SrxState::Active);
-        assert!(r.data.unwrap().enrolled);
+        assert_eq!(
+            r.data.unwrap().connection_url.as_deref(),
+            Some("https://atp.example.com")
+        );
+    }
+
+    #[test]
+    fn atp_empty_reply_is_not_configured() {
+        // Empty reply, neither <aamw-status> nor <aamw-errors> present
+        // (defensive case — observed when the RPC is filtered out by config).
+        let xml = "<rpc-reply/>";
+        let r = parse_atp(xml);
+        assert_eq!(r.state, SrxState::NotConfigured);
+        assert!(
+            r.reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("aamw-status element absent"),
+            "reason: {:?}",
+            r.reason
+        );
     }
 }

@@ -157,8 +157,10 @@ impl JmcpSrxHandler {
                        VPN troubleshooting. Returns state=active with IKE SA list, IPsec SA list, \
                        and correlations when VPN is configured (even if no SAs are currently up). \
                        Returns state=not_configured only when both IKE and IPsec RPCs report that \
-                       the security stanza is absent. Optionally filter by peer IP (substring) \
-                       or tunnel name."
+                       the security stanza is absent. Optionally filter by `peer` (substring \
+                       match against both IKE remote address and IPsec gateway) and/or `tunnel` \
+                       (substring match against IPsec remote gateway — the brief-style IPsec \
+                       RPC does not surface the st0 interface name)."
     )]
     async fn vpn_lifecycle_report(
         &self,
