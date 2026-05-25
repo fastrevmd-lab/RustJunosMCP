@@ -510,3 +510,85 @@ Same release-gate rule v0.1.0 and v0.1.1 used.
   `request_id` but cross-tool correlation (e.g. "find every audit entry for
   the same MCP request") is out of scope — v0.2.0 just sets the field per
   call.
+
+---
+
+## Appendix A — Verified RPC names (live capture)
+
+**Date verified:** 2026-05-25
+**Devices used:** `vSRX-CI-tester` (192.168.1.227, standalone), `vSRX-test19-20` (192.168.1.241, chassis cluster)
+**Junos version:** `24.4R1.9`
+**Capture method:** 3-hop SSH `workstation → pve3 → lxc-601 → netconf@<device>` using NETCONF `<command format="xml">` wrapper around the CLI command. Fixtures are the bare `<rpc-reply>` body, matching existing `tests/fixtures/cluster_status/*.xml` format.
+
+This appendix closes **eng-review finding A1** (verify RPC names against the live device before parser implementation).
+
+### A.1 — RPC name table
+
+| CLI command | Reply container | Detail element | Notes |
+|---|---|---|---|
+| `show security idp security-package-version` | `<idp-security-package-information>` | structured (`<security-package-version>`, `<detector-version>`, `<policy-template-version>`, `<security-package-rollback-version>`, `<security-package-rollback-detector-version>`) | Standalone shape. **NOT** `<get-idp-security-package-information>` as earlier spec drafts assumed. |
+| same, on chassis cluster | `<multi-routing-engine-results>` → per-node `<multi-routing-engine-item>` (`<re-name>node0/node1</re-name>`) → `<idp-security-package-information>` | same | Parser must check for multi-RE wrapper first. |
+| `request security idp security-package download check-server` | `<secpack-download-status>` | `<secpack-download-status-detail>` (free text) | Both "update available" and "at latest" return the same wire format — parser must compare current version vs response version text. |
+| `request security idp security-package download` | `<secpack-download-status>` | `<secpack-download-status-detail>` | Async — returns `"Will be processed in async mode..."`. |
+| `request security idp security-package download status` | `<secpack-download-status>` | `<secpack-download-status-detail>` | Polled. `"In progress:..."` while running, `"Done;Successfully downloaded..."` when complete. |
+| `request security idp security-package install` | `<secpack-update-status>` | `<secpack-status-detail>` | **Different container and detail tag** from download path. Async. |
+| `request security idp security-package install status` | `<secpack-update-status>` | `<secpack-status-detail>` | Polled. `"In progress:Installing..."` → `"Done;Attack DB update : successful..."`. |
+| `request security idp security-package rollback` | `<secpack-rollback-status>` | `<secpack-rollback-status-detail>` | Third distinct container. Async. |
+| `request security idp security-package rollback status` | `<secpack-rollback-status>` | `<secpack-rollback-status-detail>` | `"Done;Manual Rollback Failed;No backup available for rollback"` when no rollback target. |
+| `show system commit` | `<commit-information>` | per-commit `<commit-history>`; `<commit-confirmed>rollback pending</commit-confirmed>` element present when a confirmed window is open | Parser keys off `<commit-confirmed>` element (not just the `<comment>` text). |
+
+### A.2 — Three error channels (parser must handle all three)
+
+Live captures revealed Junos returns signature-package errors in **three distinct shapes**, not one:
+
+1. **Daemon timeout** → `<rpc-error>` with `<error-tag>operation-failed</error-tag>` and `<error-message>timeout communicating with idp-policy daemon</error-message>`. Returned when `idpd` is not initialized (e.g., no `security idp` config stanza, daemon needs `restart idp-policy`).
+2. **In-band failure** → status-detail text begins with `"Done;...Failed;..."` or `"Done;...not performed..."`. Example: rollback when no previous version, install when downloaded == installed.
+3. **xnm:error wrapper** → `<xnm:error xmlns:xnm="http://xml.juniper.net/xnm/1.1/xnm"><message>Fetching signed manifest.xml failed, error: Server not reachable</message></xnm:error>`. Returned when the configured signature-package URL is unreachable.
+
+The parser dispatch order must be: rpc-error → xnm:error → in-band `Done;Failed;` / `Done;...not performed` → success `Done;Successfully...`.
+
+### A.3 — Schema divergences from initial spec assumptions
+
+- **Detail elements are free-text, not structured fields.** The spec assumed elements like `<server-version>`, `<update-available/>`, etc. Reality: a single `<secpack-*-detail>` element with line-broken text. Parsers must regex out:
+  - `Version info:(\d+)\(...Detector=([\d.]+)...\)` for version + detector
+  - `Successfully downloaded from\((.+?)\)` for the URL used
+  - `Done;...Failed;(.+)` for in-band failure messages
+- **Check-server and download share the same RPC.** `request security idp security-package download check-server` and `request security idp security-package download status` both return `<secpack-download-status>`. The first is a synchronous probe; the second polls a running download. They cannot be distinguished by reply shape — only by what the caller asked.
+- **Cluster wrapper is multi-RE, not redundancy-group.** Unlike `show chassis cluster status` (which uses `<chassis-cluster-status>` with redundancy-group structure), `show security idp security-package-version` on a cluster wraps each RE's reply in `<multi-routing-engine-results>` / `<multi-routing-engine-item>`. The Phase 1B cluster parser does NOT apply here.
+
+### A.4 — Pre-flight requirements discovered
+
+- `idpd` must be initialized before any sig-pkg RPC works. Initialization requires (a) at least the `security idp security-package url` stanza configured AND (b) a `restart idp-policy` if the daemon was previously running without config. A fresh device with no IDP stanza will hang for ~60s and return `timeout communicating with idp-policy daemon`. Pre-flight should detect this case and surface a `SignaturePackageDaemonNotReady` (new variant — was not in the Task 2 list) or auto-issue `restart idp-policy` and retry once.
+- Outbound IPv4 to `signatures.juniper.net` is required. IPv6 is not (CI-tester resolved AAAA but had no IPv6 default route, and Junos appears to fall back to A automatically).
+
+### A.5 — Fixtures captured
+
+Filenames under `rust-srxmcp-core/tests/fixtures/signature_package/`:
+
+| Fixture | Origin | Notes |
+|---|---|---|
+| `idp_package_information_fresh.xml` | CI-tester, pre-config | All fields `N/A` |
+| `idp_package_information_post_install.xml` | CI-tester, post-install of 3910 | Real version + detector strings |
+| `idp_package_information_clustered.xml` | vSRX-test19-20, both nodes N/A | Multi-RE wrapper |
+| `idp_check_server_update_available.xml` | CI-tester, current=N/A, server=3910 | Same wire format as `at_latest` |
+| `idp_check_server_at_latest.xml` | CI-tester, current=3910, server=3910 | Same wire format as `update_available` |
+| `idp_check_server_unreachable.xml` | CI-tester, bogus URL | `<xnm:error>` channel |
+| `idp_download_request.xml` | CI-tester | Async ack |
+| `idp_download_status_running.xml` | CI-tester | `In progress:...` |
+| `idp_download_status_complete.xml` | CI-tester | `Done;Successfully downloaded...` |
+| `idp_install_request.xml` | CI-tester | Async ack, **different container** from download |
+| `idp_install_status_running.xml` | CI-tester | `In progress:Installing AI ...` |
+| `idp_install_status_complete.xml` | CI-tester | `Done;Attack DB update : successful...` |
+| `idp_install_status_noop_same_version.xml` | CI-tester, install after install | In-band "not performed due to same version" |
+| `idp_rollback_request.xml` | CI-tester | Async ack |
+| `idp_rollback_no_previous.xml` | CI-tester, no prior install | In-band `Done;Manual Rollback Failed;No backup available...` |
+| `commit_confirmed_active.xml` | CI-tester, window opened via raw NETCONF | `<commit-confirmed>rollback pending</commit-confirmed>` element present |
+
+### A.6 — Still-pending captures
+
+| Fixture | Why deferred |
+|---|---|
+| `cluster_desynced.xml` | Requires deliberate cluster disruption on test19-20 (reboot of node1). Out of scope for fixture capture pass; can synthesize from existing `cluster_status` fixtures during Task 3b. |
+| `idp_install_status_error.xml` (true install-without-download) | Requires deleting `/var/db/idpd-secpack` via root shell on the device. The captured `idp_install_status_noop_same_version.xml` covers the realistic "stale download" failure path instead. |
+| `license_inactive_idp.xml` | Pure synthetic — hand-construct from existing `tests/fixtures/license/*.xml` by removing the `IDP-SIG`/`idp-sig` feature record. No live capture needed. |
+

@@ -1,0 +1,3 @@
+<xnm:error format="xml"  xmlns:xnm="http://xml.juniper.net/xnm/1.1/xnm">
+<message>Fetching signed manifest.xml failed, error: Server not reachable</message>
+</xnm:error>
