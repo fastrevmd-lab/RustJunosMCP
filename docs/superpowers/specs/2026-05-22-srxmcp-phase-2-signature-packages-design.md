@@ -30,8 +30,9 @@ which version is installed*, with the same two-call confirmation pattern that
 
 ## Tool surface
 
-Two new MCP tools registered in `rust-srxmcp/src/server.rs`'s `SERVER_TOOLS`
-list, growing it from 5 to 7 tools.
+Two new MCP tools added inline to `JmcpSrxHandler` in
+`rust-srxmcp/src/server.rs` via the existing `#[tool_router]` /
+`#[tool]` pattern, growing the surface from 5 to 7 tools.
 
 ### `manage_idp_security_package`
 
@@ -198,9 +199,12 @@ Destructive workflow proceeds linearly.
 
 ### Per-router lock
 
-Same `KeyedMutex` machinery `upgrade_junos` uses, keyed on router name.
-Prevents two concurrent destructive ops on the same device (whether IDP,
-AppID, or junos image upgrade). Acquired after call 2 pre-flight passes,
+Same `TransferLocks` machinery `upgrade_junos` and `transfer_file` share
+(`tokio::sync::Semaphore`-per-router map in
+`rust-junosmcp-core/src/tools/transfer_file.rs`, the
+`OwnedSemaphorePermit` released on drop). Keyed on router name. Prevents
+two concurrent destructive ops on the same device (whether IDP, AppID,
+or junos image upgrade). Acquired after call 2 pre-flight passes,
 released on drop after post-install verification.
 
 ## Workflow phases (destructive path, `confirm: true`)
@@ -254,16 +258,19 @@ rust-srxmcp-core/src/
 │       └── plan.rs                   # confirmation-plan JSON shape + already_at_target detection
 ```
 
-### New files in `rust-srxmcp/`
+### Changes in `rust-srxmcp/`
 
-```text
-rust-srxmcp/src/handlers/
-├── manage_idp_security_package.rs        # MCP tool entry; args validation; dispatches to workflows::idp_package::run
-└── manage_appid_signature_package.rs     # MCP tool entry; args validation; dispatches to workflows::appid_package::run
-```
+No new files. Two new `#[tool]` methods are added inline to
+`JmcpSrxHandler` in `rust-srxmcp/src/server.rs`, matching the inline
+pattern used by the five Phase 1B tools:
 
-Tool registration: two new `ToolSpec` entries appended to `SERVER_TOOLS` in
-`rust-srxmcp/src/server.rs`.
+- `manage_idp_security_package` — args validation; dispatches to `workflows::idp_package::run`
+- `manage_appid_signature_package` — args validation; dispatches to `workflows::appid_package::run`
+
+The `instructions` string returned by `ServerHandler::get_info()` is
+updated to mention both new tools alongside the existing list. No
+`SERVER_TOOLS` constant exists today; tool registration happens via the
+`#[tool_router]` macro on the `impl` block.
 
 ### `signature_package/` submodule responsibilities
 
@@ -320,9 +327,15 @@ envelope shape as `upgrade_junos`'s errors. Each carries the router name.
 
 ### Audit log entries
 
-Append-only JSON Lines to `JMCP_AUDIT_LOG_PATH` (default `/var/log/jmcp/audit.log`
-— same file `upgrade_junos` writes to). One entry per destructive operation
-phase transition; `check_server` is not audited.
+Emitted via `tracing::info!(target = "audit", ...)` — same pattern
+`upgrade_junos` uses (see `rust-junosmcp/src/server.rs` and the
+`upgrade_audit_guard_tests` module). The structured fields below are
+attached as tracing key-values so any subscriber (the default
+`tracing_subscriber` JSON layer, `journalctl -u rust-srxmcp`, or a
+downstream log shipper) renders the same payload. One entry per
+destructive operation phase transition; `check_server` is not audited.
+
+Field shape, as it would render through the JSON subscriber:
 
 ```json
 {
@@ -338,6 +351,10 @@ phase transition; `check_server` is not audited.
   "target_version": "3714"
 }
 ```
+
+If structured JSONL on disk is desired in the future, the operator wires
+a file-rotating tracing layer — that's an infra decision separate from
+this tool's audit shape.
 
 Phase transitions:
 
