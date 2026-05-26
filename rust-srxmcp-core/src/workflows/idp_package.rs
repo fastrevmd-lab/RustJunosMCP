@@ -44,8 +44,6 @@ const RPC_DOWNLOAD: &str = "request-idp-security-package-download";
 const RPC_DOWNLOAD_STATUS: &str = "get-idp-security-package-download-status";
 const RPC_INSTALL: &str = "request-idp-security-package-install";
 const RPC_INSTALL_STATUS: &str = "get-idp-security-package-install-status";
-// Used by Task 6 `rollback` verb.
-#[allow(dead_code)]
 const RPC_ROLLBACK: &str = "request-idp-security-package-rollback";
 
 // Defaults for the destructive workflow. Per design §"Workflow phases":
@@ -102,6 +100,12 @@ pub struct IdpCheckServerNode {
     pub current_package_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_detector_version: Option<String>,
+    /// Raw `<security-package-rollback-version>` text — `None` when absent
+    /// or `"N/A(N/A)"` (device has no preserved previous package). Used by
+    /// the `rollback` verb's pre-flight to decide whether a rollback target
+    /// is available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_rollback_version: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema, Clone, PartialEq, Eq)]
@@ -210,10 +214,13 @@ pub fn parse_package_information(reply_xml: &str) -> Result<Vec<IdpCheckServerNo
         let normalized = version_text.and_then(|v| normalize_version_text(&v));
         let detector_text = crate::xml::text_of(info_xml, "detector-version");
         let normalized_detector = detector_text.and_then(|v| normalize_version_text(&v));
+        let rollback_text = crate::xml::text_of(info_xml, "security-package-rollback-version");
+        let normalized_rollback = rollback_text.and_then(|v| normalize_version_text(&v));
         out.push(IdpCheckServerNode {
             re_name: node.re_name,
             current_package_version: normalized,
             current_detector_version: normalized_detector,
+            current_rollback_version: normalized_rollback,
         });
     }
     Ok(out)
@@ -463,6 +470,64 @@ pub fn build_plan(
         warning,
     };
     PlanOutcome::NeedsConfirmation(ConfirmationPlan::DownloadAndInstall(plan))
+}
+
+/// Build the call-1 response for `rollback`. Pure: no device I/O.
+///
+/// Inspects `snapshot.nodes[*].current_rollback_version` to find the
+/// preserved previous package; returns
+/// [`SrxError::SignaturePackageNoRollbackTarget`] if no node reports one.
+///
+/// Picks the rollback target as the first node's value (cluster nodes are
+/// normally in lockstep — a mismatched cluster will surface at post-rollback
+/// verification time, not here).
+pub fn build_rollback_plan(
+    snapshot: &IdpCheckServerData,
+    blockers: &[String],
+) -> Result<crate::workflows::signature_package::ConfirmationPlan, SrxError> {
+    use crate::workflows::signature_package::{
+        ConfirmationPlan, ConfirmationRequiredTag, RollbackAction, RollbackPlan,
+    };
+
+    let target = snapshot
+        .nodes
+        .iter()
+        .find_map(|n| n.current_rollback_version.clone())
+        .ok_or_else(|| SrxError::SignaturePackageNoRollbackTarget {
+            router: snapshot.router.clone(),
+        })?;
+
+    // Current version surfaces as "N/A" when no node reports one — matches
+    // the convention used by `build_plan`.
+    let current = snapshot
+        .nodes
+        .iter()
+        .find_map(|n| n.current_package_version.clone())
+        .unwrap_or_else(|| "N/A".to_string());
+
+    let warning = format!(
+        "Will revert IDP signature package from {current} to {target} on {router} ({topology}). \
+         Brief IDP processing pause (~30s); no data-plane outage.",
+        current = leading_version_number(&current),
+        target = leading_version_number(&target),
+        router = snapshot.router,
+        topology = match snapshot.topology {
+            crate::workflows::signature_package::Topology::Standalone => "standalone",
+            crate::workflows::signature_package::Topology::ChassisCluster => "chassis cluster",
+        }
+    );
+
+    Ok(ConfirmationPlan::Rollback(RollbackPlan {
+        code: ConfirmationRequiredTag::ConfirmationRequired,
+        router: snapshot.router.clone(),
+        action: RollbackAction::Rollback,
+        service: snapshot.service,
+        topology: snapshot.topology,
+        current_package_version: current,
+        rollback_target_version: target,
+        preflight_blockers: blockers.to_vec(),
+        warning,
+    }))
 }
 
 // ── `download_and_install` — destructive workflow ─────────────────────────────
@@ -936,11 +1001,306 @@ async fn verify_installed_version(
     Ok(installed)
 }
 
+// ── `rollback` — destructive workflow ─────────────────────────────────────────
+
+/// Terminal success payload returned by call 2 of `rollback`.
+#[derive(Debug, Serialize, JsonSchema, Clone, PartialEq, Eq)]
+pub struct RollbackCompletedData {
+    pub status: CompletedTag,
+    pub router: String,
+    pub service: Service,
+    pub topology: crate::workflows::signature_package::Topology,
+    /// Version that was active before rollback fired (pre-rollback snapshot).
+    pub previous_package_version: String,
+    /// Version that is active after rollback (= rollback target).
+    pub installed_package_version: String,
+    pub elapsed_seconds: u64,
+}
+
+/// MCP-caller response from `rollback`. `confirmation_required` flows back
+/// as `SrxError::SignaturePackageConfirmationRequired { plan }`; this enum
+/// only encodes the call-2 terminal-success shape today.
+#[derive(Debug, Serialize, JsonSchema, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum RollbackResponse {
+    Completed(RollbackCompletedData),
+}
+
+/// Run the `rollback` verb. Two-call protocol mirroring `download_and_install`:
+///
+/// * `args.confirm == false`:
+///   * Pre-flight runs (license + cluster + commit-confirmed warn + package-info).
+///   * No `signatures.juniper.net` reachability check — rollback is a local op.
+///   * If no node reports a `<security-package-rollback-version>`, returns
+///     `Err(SignaturePackageNoRollbackTarget)`.
+///   * Otherwise builds the plan and returns
+///     `Err(SignaturePackageConfirmationRequired { plan })`.
+/// * `args.confirm == true`:
+///   * Per-router lock acquired **first** (TOCTOU per design D4), then
+///     pre-flight re-runs under the lock.
+///   * Fires `request-idp-security-package-rollback`. Per design §"IDP
+///     `rollback`" phase 5, the device-side semantics are synchronous;
+///     this code does not poll — it reads `get-idp-security-package-information`
+///     immediately afterwards to verify.
+///   * Returns `Ok(Completed(...))` on terminal success.
+pub async fn rollback(
+    device: &mut PooledDevice,
+    transfer_locks: &TransferLocks,
+    args: &IdpPackageArgs,
+    caller: Option<&str>,
+    request_id: &str,
+) -> Result<RollbackResponse, SrxError> {
+    if args.router.trim().is_empty() {
+        return Err(SrxError::InvalidInput("router must not be empty".into()));
+    }
+
+    if !args.confirm {
+        let (snapshot, _blockers) = preflight_rollback(device, args).await?;
+        let plan = build_rollback_plan(&snapshot, &[])?;
+        let plan_value = serde_json::to_value(&plan)
+            .map_err(|e| SrxError::Parse(format!("serializing ConfirmationPlan: {e}")))?;
+        Err(SrxError::SignaturePackageConfirmationRequired {
+            router: args.router.clone(),
+            plan: plan_value,
+        })
+    } else {
+        let _permit = transfer_locks.acquire(&args.router).await;
+        run_rollback_destructive(device, args, caller, request_id).await
+    }
+}
+
+/// Pre-flight pipeline for rollback. Same shape as `preflight` for
+/// `download_and_install` but with **no** `check_server` call — rollback
+/// is local-only, doesn't touch `signatures.juniper.net`.
+async fn preflight_rollback(
+    device: &mut PooledDevice,
+    args: &IdpPackageArgs,
+) -> Result<(IdpCheckServerData, Vec<String>), SrxError> {
+    crate::workflows::signature_package::preflight::license_active(
+        device,
+        &args.router,
+        crate::workflows::license::SrxLicensedFeature::Idp,
+    )
+    .await?;
+
+    let topology =
+        crate::workflows::signature_package::preflight::cluster_topology(device, &args.router)
+            .await?;
+
+    let mut blockers: Vec<String> = Vec::new();
+    if let Ok(mut exec) = device.rpc() {
+        if let Ok(commit_xml) = exec.call("get-commit-information", &[]).await {
+            if let Ok(true) =
+                crate::workflows::signature_package::preflight::detect_commit_confirmed(&commit_xml)
+            {
+                tracing::warn!(
+                    target: "audit",
+                    event = "sigpkg_commit_confirmed_window_active",
+                    router = %args.router,
+                    "commit-confirmed window open; proceeding because sig-package rollback is op-mode"
+                );
+                blockers.push("commit-confirmed window open (informational)".to_string());
+            }
+        }
+    }
+
+    let info_xml = {
+        let mut exec = device
+            .rpc()
+            .map_err(|e| SrxError::Transport(rust_junosmcp_core::JmcpError::from(e)))?;
+        exec.call(RPC_PACKAGE_INFORMATION, &[])
+            .await
+            .map_err(|e| SrxError::Transport(rust_junosmcp_core::JmcpError::from(e)))?
+    };
+    let nodes = parse_package_information(&info_xml)?;
+
+    let snapshot = IdpCheckServerData {
+        router: args.router.clone(),
+        service: Service::Idp,
+        topology,
+        // rollback path doesn't consult check-server; field exists for the
+        // shared snapshot shape, never read by build_rollback_plan.
+        latest_version: String::new(),
+        nodes,
+        update_available: false,
+        raw_xml: None,
+    };
+    Ok((snapshot, blockers))
+}
+
+/// Destructive rollback pipeline. Caller MUST hold the per-router lock.
+async fn run_rollback_destructive(
+    device: &mut PooledDevice,
+    args: &IdpPackageArgs,
+    caller: Option<&str>,
+    request_id: &str,
+) -> Result<RollbackResponse, SrxError> {
+    let started = tokio::time::Instant::now();
+
+    // Phase 3: re-run pre-flight under the lock.
+    let (snapshot, _blockers) = preflight_rollback(device, args).await?;
+
+    let target = snapshot
+        .nodes
+        .iter()
+        .find_map(|n| n.current_rollback_version.clone())
+        .ok_or_else(|| SrxError::SignaturePackageNoRollbackTarget {
+            router: args.router.clone(),
+        })?;
+    let previous = snapshot
+        .nodes
+        .iter()
+        .find_map(|n| n.current_package_version.clone())
+        .unwrap_or_else(|| "N/A".to_string());
+
+    // Phase 4: audit preflight_passed.
+    audit_phase_with_action(
+        "preflight_passed",
+        "rollback",
+        args,
+        caller,
+        request_id,
+        &previous,
+        &target,
+        None,
+    );
+
+    // Phase 5: fire rollback RPC. Junos returns either "Will be processed in
+    // async mode" (happy) or "Done;Manual Rollback Failed;No backup available"
+    // when the rollback target evaporated between call 1 and call 2.
+    let reply = {
+        let mut exec = device
+            .rpc()
+            .map_err(|e| SrxError::Transport(rust_junosmcp_core::JmcpError::from(e)))?;
+        exec.call(RPC_ROLLBACK, &[]).await.map_err(|e| {
+            let err = SrxError::Transport(rust_junosmcp_core::JmcpError::from(e));
+            audit_phase_with_action(
+                "failed",
+                "rollback",
+                args,
+                caller,
+                request_id,
+                &previous,
+                &target,
+                Some(&err),
+            );
+            err
+        })?
+    };
+
+    if let Err(e) = parse_rollback_ack(&reply, &args.router) {
+        audit_phase_with_action(
+            "failed",
+            "rollback",
+            args,
+            caller,
+            request_id,
+            &previous,
+            &target,
+            Some(&e),
+        );
+        return Err(e);
+    }
+
+    // Phase 6: audit install_complete (overloaded per spec §"IDP `rollback`"
+    // step 6 — semantics are "active-version change committed").
+    audit_phase_with_action(
+        "install_complete",
+        "rollback",
+        args,
+        caller,
+        request_id,
+        &previous,
+        &target,
+        None,
+    );
+
+    // Phase 7: verify — post-rollback version matches the rollback target.
+    let installed = verify_installed_version(device, args, &target)
+        .await
+        .inspect_err(|e| {
+            audit_phase_with_action(
+                "failed",
+                "rollback",
+                args,
+                caller,
+                request_id,
+                &previous,
+                &target,
+                Some(e),
+            );
+        })?;
+
+    // Phase 8: audit verified.
+    audit_phase_with_action(
+        "verified", "rollback", args, caller, request_id, &installed, &target, None,
+    );
+
+    let elapsed = started.elapsed().as_secs();
+    Ok(RollbackResponse::Completed(RollbackCompletedData {
+        status: CompletedTag::Completed,
+        router: args.router.clone(),
+        service: Service::Idp,
+        topology: snapshot.topology,
+        previous_package_version: previous,
+        installed_package_version: installed,
+        elapsed_seconds: elapsed,
+    }))
+}
+
+/// Inspect the rollback RPC reply. Returns `Ok(())` when Junos accepted the
+/// rollback (async-mode ack or `"Done;"`), `SignaturePackageNoRollbackTarget`
+/// when the device explicitly says no backup is available, or
+/// `SignaturePackageInstallFailed` (action overload — design audits rollback
+/// failures under the install error variant) for other `"Failed;"` cases.
+fn parse_rollback_ack(reply_xml: &str, router: &str) -> Result<(), SrxError> {
+    let detail =
+        crate::xml::text_of(reply_xml, "secpack-rollback-status-detail").unwrap_or_default();
+    match parse_async_status_detail(&detail) {
+        AsyncStatusOutcome::Done | AsyncStatusOutcome::Pending => Ok(()),
+        AsyncStatusOutcome::Failed(d) => {
+            if d.contains("No backup available") {
+                Err(SrxError::SignaturePackageNoRollbackTarget {
+                    router: router.to_string(),
+                })
+            } else {
+                Err(SrxError::SignaturePackageInstallFailed {
+                    router: router.to_string(),
+                    detail: d,
+                })
+            }
+        }
+    }
+}
+
 /// Emit one structured audit line. Field set documented in design doc
 /// §"Audit log entries" — also surfaces `error_code` + `error_detail` on
 /// the `failed` phase.
 fn audit_phase(
     phase: &str,
+    args: &IdpPackageArgs,
+    caller: Option<&str>,
+    request_id: &str,
+    current_version: &str,
+    target_version: &str,
+    failure: Option<&SrxError>,
+) {
+    audit_phase_with_action(
+        phase,
+        "download_and_install",
+        args,
+        caller,
+        request_id,
+        current_version,
+        target_version,
+        failure,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn audit_phase_with_action(
+    phase: &str,
+    action: &str,
     args: &IdpPackageArgs,
     caller: Option<&str>,
     request_id: &str,
@@ -961,7 +1321,7 @@ fn audit_phase(
             target: "audit",
             tool = "manage_idp_security_package",
             router = %args.router,
-            action = "download_and_install",
+            action = %action,
             service = "idp",
             caller = %caller_str,
             request_id = %request_id,
@@ -977,7 +1337,7 @@ fn audit_phase(
             target: "audit",
             tool = "manage_idp_security_package",
             router = %args.router,
-            action = "download_and_install",
+            action = %action,
             service = "idp",
             caller = %caller_str,
             request_id = %request_id,
@@ -1044,6 +1404,41 @@ mod tests {
         assert_eq!(
             nodes[0].current_detector_version, None,
             "N/A detector normalises to None"
+        );
+    }
+
+    #[test]
+    fn fresh_device_has_no_rollback_target() {
+        // Both fresh + post-install lab fixtures carry
+        // <security-package-rollback-version>N/A(N/A)</...> — the lab
+        // hasn't accumulated a rollback history yet. The parser must
+        // normalise that to None.
+        let xml = fixture("idp_package_information_fresh.xml");
+        let nodes = parse_package_information(&xml).expect("parse");
+        assert_eq!(
+            nodes[0].current_rollback_version, None,
+            "N/A rollback-version normalises to None"
+        );
+    }
+
+    #[test]
+    fn rollback_version_extracted_when_present() {
+        // Synthesized — the live lab never had a rollback target during
+        // the fixture-capture window. Schema mirrors Junos's standalone
+        // <idp-security-package-information> reply.
+        let xml = r#"<idp-security-package-information>
+            <security-package-version>3714(4.1)</security-package-version>
+            <detector-version>12.6.180250827</detector-version>
+            <policy-template-version>3714</policy-template-version>
+            <security-package-rollback-version>3712(4.1)</security-package-rollback-version>
+            <security-package-rollback-detector-version>12.6.180200620</security-package-rollback-detector-version>
+        </idp-security-package-information>"#;
+        let nodes = parse_package_information(xml).expect("parse");
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(
+            nodes[0].current_rollback_version.as_deref(),
+            Some("3712(4.1)"),
+            "rollback-version surfaces from synthetic fixture"
         );
     }
 
@@ -1231,6 +1626,7 @@ mod tests {
                 re_name: String::new(),
                 current_package_version: None,
                 current_detector_version: None,
+                current_rollback_version: None,
             }],
             update_available: true,
             raw_xml: None,
@@ -1247,6 +1643,7 @@ mod tests {
                 re_name: String::new(),
                 current_package_version: Some(current.into()),
                 current_detector_version: Some("12.6.180250827".into()),
+                current_rollback_version: None,
             }],
             update_available: false,
             raw_xml: None,
@@ -1338,6 +1735,109 @@ mod tests {
                 assert_eq!(j["preflight_blockers"][0], "commit-confirmed window open");
             }
             other => panic!("expected NeedsConfirmation, got {other:?}"),
+        }
+    }
+
+    // ── build_rollback_plan ──────────────────────────────────────────────────
+
+    fn rollback_eligible_snapshot(current: &str, rollback_target: &str) -> IdpCheckServerData {
+        IdpCheckServerData {
+            router: "vsrx-test10".into(),
+            service: Service::Idp,
+            topology: crate::workflows::signature_package::Topology::Standalone,
+            latest_version: String::new(),
+            nodes: vec![IdpCheckServerNode {
+                re_name: String::new(),
+                current_package_version: Some(current.into()),
+                current_detector_version: Some("12.6.180250827".into()),
+                current_rollback_version: Some(rollback_target.into()),
+            }],
+            update_available: false,
+            raw_xml: None,
+        }
+    }
+
+    #[test]
+    fn rollback_plan_returns_needs_confirmation_with_target() {
+        let snap = rollback_eligible_snapshot("3714(4.1)", "3712(4.1)");
+        let plan = build_rollback_plan(&snap, &[]).expect("rollback target present");
+        let j = serde_json::to_value(&plan).expect("serialize");
+        assert_eq!(j["code"], "confirmation_required");
+        assert_eq!(j["action"], "rollback");
+        assert_eq!(j["service"], "idp");
+        assert_eq!(j["topology"], "standalone");
+        assert_eq!(j["current_package_version"], "3714(4.1)");
+        assert_eq!(j["rollback_target_version"], "3712(4.1)");
+        let warn = j["warning"].as_str().expect("warning string");
+        assert!(
+            warn.contains("3712"),
+            "warning mentions rollback target: {warn}"
+        );
+        assert!(warn.contains("3714"), "warning mentions current: {warn}");
+    }
+
+    #[test]
+    fn rollback_plan_errors_when_no_rollback_target() {
+        // Fresh device — no <security-package-rollback-version>.
+        let snap = fresh_snapshot("3910");
+        let err = build_rollback_plan(&snap, &[]).expect_err("must reject");
+        match err {
+            SrxError::SignaturePackageNoRollbackTarget { router } => {
+                assert_eq!(router, "vsrx-test10");
+            }
+            other => panic!("expected SignaturePackageNoRollbackTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rollback_plan_carries_blockers_through() {
+        let snap = rollback_eligible_snapshot("3714(4.1)", "3712(4.1)");
+        let plan = build_rollback_plan(&snap, &["commit-confirmed window open".to_string()])
+            .expect("plan builds");
+        let j = serde_json::to_value(&plan).unwrap();
+        assert_eq!(j["preflight_blockers"][0], "commit-confirmed window open");
+    }
+
+    // ── parse_rollback_ack ───────────────────────────────────────────────────
+
+    #[test]
+    fn rollback_ack_async_mode_is_ok() {
+        // idp_rollback_request.xml — the happy-path Junos ack.
+        let xml = fixture("idp_rollback_request.xml");
+        parse_rollback_ack(&xml, "vsrx-test10").expect("async-mode ack accepts");
+    }
+
+    #[test]
+    fn rollback_ack_no_backup_returns_no_rollback_target() {
+        // idp_rollback_no_previous.xml — Junos's immediate refusal when
+        // there's no preserved rollback target (TOCTOU race against call 1).
+        let xml = fixture("idp_rollback_no_previous.xml");
+        let err = parse_rollback_ack(&xml, "vsrx-test10").expect_err("must reject");
+        match err {
+            SrxError::SignaturePackageNoRollbackTarget { router } => {
+                assert_eq!(router, "vsrx-test10");
+            }
+            other => panic!("expected SignaturePackageNoRollbackTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rollback_ack_other_failed_maps_to_install_failed() {
+        // Generic "Failed;" detail that isn't the no-backup token — design
+        // overloads SignaturePackageInstallFailed for rollback failures.
+        let xml = r#"<secpack-rollback-status format="xml">
+            <secpack-rollback-status-detail>Done;Manual Rollback Failed;Unexpected daemon error</secpack-rollback-status-detail>
+        </secpack-rollback-status>"#;
+        let err = parse_rollback_ack(xml, "vsrx-test10").expect_err("must reject");
+        match err {
+            SrxError::SignaturePackageInstallFailed { router, detail } => {
+                assert_eq!(router, "vsrx-test10");
+                assert!(
+                    detail.contains("Unexpected daemon error"),
+                    "detail preserved: {detail}"
+                );
+            }
+            other => panic!("expected SignaturePackageInstallFailed, got {other:?}"),
         }
     }
 }
