@@ -1,0 +1,6 @@
+<secpack-update-status format="xml">
+<secpack-status-detail>Done;Attack DB update : successful - [UpdateNumber=3910,Minor,ExportDate=Thu May 21 13:50:42 2026 UTC,Detector=12.6.180250827]
+     Updating control-plane with new detector : successful
+     Updating data-plane with new attack or detector : not performed
+      due to no active policy configured.</secpack-status-detail>
+</secpack-update-status>

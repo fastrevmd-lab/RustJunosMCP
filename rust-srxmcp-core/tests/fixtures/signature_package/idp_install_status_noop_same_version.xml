@@ -1,0 +1,6 @@
+<secpack-update-status format="xml">
+<secpack-status-detail>Done;Attack DB update : not performed
+      due to the same version between downloaded one and installed one.
+     Updating control and data-plane with new detector : not performed
+      due to the same detector version between downloaded  and installed one.</secpack-status-detail>
+</secpack-update-status>

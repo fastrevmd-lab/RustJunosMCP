@@ -1,0 +1,3 @@
+<secpack-rollback-status format="xml">
+<secpack-rollback-status-detail>Done;Manual Rollback Failed;No backup available for rollback</secpack-rollback-status-detail>
+</secpack-rollback-status>

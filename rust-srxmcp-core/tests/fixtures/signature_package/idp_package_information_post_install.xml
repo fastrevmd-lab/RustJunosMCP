@@ -1,0 +1,8 @@
+<idp-security-package-information format="xml">
+<security-package-version>3910(Minor, Thu May 21 13:50:42 2026 UTC)</security-package-version>
+<detector-version>12.6.180250827</detector-version>
+<policy-template-version>N/A</policy-template-version>
+<security-package-rollback-version>N/A(N/A)</security-package-rollback-version>
+<security-package-rollback-detector-version>N/A
+</security-package-rollback-detector-version>
+</idp-security-package-information>

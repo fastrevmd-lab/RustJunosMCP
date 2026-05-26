@@ -120,7 +120,11 @@ async fn main() -> Result<()> {
     // ── Handler ──────────────────────────────────────────────────────────────
 
     let started = Arc::new(Instant::now());
-    let handler = JmcpSrxHandler::new(started, dev_manager.clone());
+    // Shared per-router lock map. Destructive sig-package workflows acquire
+    // a permit before pre-flight re-runs (design D4 lock-first ordering).
+    let transfer_locks =
+        Arc::new(rust_junosmcp_core::tools::transfer_file::TransferLocks::default());
+    let handler = JmcpSrxHandler::new(started, dev_manager.clone(), transfer_locks);
 
     // ── SIGHUP: reload token store ───────────────────────────────────────────
     #[cfg(unix)]

@@ -16,7 +16,9 @@ async fn srxmcp_status_returns_version_endpoint_and_uptime() {
     let dev_manager = Arc::new(DeviceManager::new(inv));
 
     let started = Arc::new(Instant::now());
-    let handler = JmcpSrxHandler::new(started.clone(), dev_manager);
+    let transfer_locks =
+        Arc::new(rust_junosmcp_core::tools::transfer_file::TransferLocks::default());
+    let handler = JmcpSrxHandler::new(started.clone(), dev_manager, transfer_locks);
 
     // Small delay so uptime > 0 ms (still 0 seconds, fine).
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;

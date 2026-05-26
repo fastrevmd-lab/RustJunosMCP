@@ -1,0 +1,3 @@
+<secpack-rollback-status format="xml">
+<secpack-rollback-status-detail>Will be processed in async mode. Check the status using the status checking CLI</secpack-rollback-status-detail>
+</secpack-rollback-status>

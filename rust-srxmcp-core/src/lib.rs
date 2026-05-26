@@ -15,6 +15,11 @@ pub use error::SrxError;
 pub use workflows::cluster_status::{
     ClusterNode, ClusterStatusArgs, ClusterStatusData, RedundancyGroup, RgMember,
 };
+pub use workflows::idp_package::{
+    DownloadAndInstallCompletedData, DownloadAndInstallResponse, IdpAction, IdpCheckServerData,
+    IdpCheckServerNode, IdpPackageArgs, IdpPackageResponse, RollbackCompletedData,
+    RollbackResponse,
+};
 pub use workflows::license::{
     LicenseArgs, LicenseCounts, LicenseData, LicenseRecord, SrxLicensedFeature,
 };

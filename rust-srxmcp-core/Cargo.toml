@@ -1,6 +1,6 @@
 [package]
 name        = "rust-srxmcp-core"
-version     = "0.1.1"
+version     = "0.1.2"
 edition.workspace     = true
 license.workspace     = true
 repository.workspace  = true
@@ -22,4 +22,4 @@ tokio              = { workspace = true, features = ["macros", "rt", "time"] }
 
 [dev-dependencies]
 pretty_assertions  = "1"
-tokio              = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio              = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
