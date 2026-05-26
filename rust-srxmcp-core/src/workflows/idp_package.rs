@@ -530,6 +530,54 @@ pub fn build_rollback_plan(
     }))
 }
 
+// ── Unified verb dispatcher ───────────────────────────────────────────────────
+
+/// MCP-caller response union for `manage_idp_security_package`. Each variant
+/// corresponds to one [`IdpAction`].
+///
+/// Serializes untagged so the JSON body the caller receives matches the
+/// per-verb shape documented in the design spec — no `{ "kind": "rollback",
+/// "data": {...} }` envelope.
+#[derive(Debug, Serialize, JsonSchema, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum IdpPackageResponse {
+    CheckServer(IdpCheckServerData),
+    DownloadAndInstall(DownloadAndInstallResponse),
+    Rollback(RollbackResponse),
+}
+
+/// Single entry point used by the MCP handler. Matches on `args.action` and
+/// fans out to the per-verb implementations.
+///
+/// * `transfer_locks` — per-router lock map (shared with `transfer_file` and
+///   `upgrade_junos`). Ignored by `check_server`; required for the destructive
+///   verbs to enforce the lock-first ordering documented in design §D4.
+/// * `caller` — `token_name` of the authenticated bearer token, or `None`
+///   under stdio. Surfaces in audit lines.
+/// * `request_id` — short unique tag the handler generates per call so the
+///   audit log can correlate phases of a single workflow run.
+pub async fn run(
+    device: &mut PooledDevice,
+    transfer_locks: &TransferLocks,
+    args: &IdpPackageArgs,
+    caller: Option<&str>,
+    request_id: &str,
+) -> Result<IdpPackageResponse, SrxError> {
+    match args.action {
+        IdpAction::CheckServer => check_server(device, args)
+            .await
+            .map(IdpPackageResponse::CheckServer),
+        IdpAction::DownloadAndInstall => {
+            download_and_install(device, transfer_locks, args, caller, request_id)
+                .await
+                .map(IdpPackageResponse::DownloadAndInstall)
+        }
+        IdpAction::Rollback => rollback(device, transfer_locks, args, caller, request_id)
+            .await
+            .map(IdpPackageResponse::Rollback),
+    }
+}
+
 // ── `download_and_install` — destructive workflow ─────────────────────────────
 
 /// Terminal success payload returned by call 2 of `download_and_install`.
