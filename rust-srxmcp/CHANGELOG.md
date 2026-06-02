@@ -25,6 +25,13 @@ Cosmetic patch for the Phase 3 JTAC support-bundle path builders.
   structural change). Adds two regression tests in
   `support_bundle::staging`.
 
+### Security
+- Bumped transitive `russh` 0.60.2 → 0.60.3 and `russh-cryptovec`
+  0.59.0 → 0.60.3 in `Cargo.lock` to clear RUSTSEC-2026-0154 (unbounded
+  32-bit allocation) and RUSTSEC-2026-0153 (unchecked `CryptoVec`
+  allocation/growth). Pulled in via `rustnetconf` → `rustez`; patch-level
+  bump, no API change.
+
 ## [0.2.1] — 2026-05-26
 
 Phase 2 continuation — AppID signature-package lifecycle. Adds the sibling
