@@ -276,9 +276,6 @@ impl DeviceManager {
     /// is available and healthy. Returns a `PooledDevice` guard that
     /// automatically returns the session to the pool on drop.
     pub async fn open(&self, router_name: &str) -> Result<PooledDevice, JmcpError> {
-        let inventory = self.inventory.load();
-        let entry = inventory.get(router_name)?;
-
         // Try the pool first.
         if let Some(dev) = self.pool.try_checkout(router_name).await {
             tracing::debug!(router = %router_name, "reusing pooled NETCONF session");
@@ -290,6 +287,26 @@ impl DeviceManager {
         }
 
         // No pooled session — open fresh.
+        self.connect_fresh(router_name).await
+    }
+
+    /// Open a guaranteed-fresh `Device`, bypassing the pool. Any existing
+    /// pooled entry for this router is invalidated (closed) first so a dead
+    /// session left behind by a transient blip or a reboot can't linger and
+    /// be handed to the next caller (issue #83). Use this on the reconnect
+    /// path after a pooled RPC fails with a stale-session error.
+    pub async fn open_fresh(&self, router_name: &str) -> Result<PooledDevice, JmcpError> {
+        self.pool.invalidate(&[router_name.to_string()]).await;
+        self.connect_fresh(router_name).await
+    }
+
+    /// Establish a brand-new NETCONF connection for `router_name` (no pool
+    /// checkout). Shared by [`Self::open`]'s cache-miss path and
+    /// [`Self::open_fresh`].
+    async fn connect_fresh(&self, router_name: &str) -> Result<PooledDevice, JmcpError> {
+        let inventory = self.inventory.load();
+        let entry = inventory.get(router_name)?;
+
         let mut builder = Device::connect(&entry.ip)
             .port(entry.port)
             .username(&entry.username)
@@ -367,6 +384,21 @@ mod tests {
         );
         let dm = DeviceManager::new(inv);
         let r = dm.open("nope").await;
+        assert!(matches!(r, Err(JmcpError::UnknownRouter(ref s)) if s == "nope"));
+    }
+
+    // #83: open_fresh bypasses the pool but still validates inventory; an
+    // unknown router must surface UnknownRouter rather than attempting a
+    // connection.
+    #[tokio::test]
+    async fn open_fresh_unknown_router_returns_unknown_router_error() {
+        let inv = build_inventory(
+            r#"{
+            "r1":{"ip":"127.0.0.1","username":"u","auth":{"type":"password","password":"x"}}
+        }"#,
+        );
+        let dm = DeviceManager::new(inv);
+        let r = dm.open_fresh("nope").await;
         assert!(matches!(r, Err(JmcpError::UnknownRouter(ref s)) if s == "nope"));
     }
 

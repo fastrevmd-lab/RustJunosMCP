@@ -591,10 +591,19 @@ async fn gather_facts(
     local_sha: [u8; 32],
     ct: &CancellationToken,
 ) -> Result<PreflightFacts, JmcpError> {
-    let mut dev = select_cancel(ct, dm.open(router)).await?;
+    // The cluster probe is the first RPC on a freshly checked-out session,
+    // so it's where a stale pooled session surfaces (#83). open_validated
+    // reconnects fresh and retries once if so; later probes reuse the now-
+    // proven-live session.
+    let (mut dev, cluster_status_output) = open_validated(
+        router,
+        dm.clone(),
+        "show chassis cluster status",
+        "cluster_probe",
+        ct,
+    )
+    .await?;
 
-    let cluster_status_output =
-        run_probe(&mut dev, "show chassis cluster status", "cluster_probe", ct).await?;
     let version_output =
         run_probe(&mut dev, "show version | match Junos:", "version_probe", ct).await?;
     let commit_output = run_probe(&mut dev, "show system commit", "commit_probe", ct).await?;
@@ -629,6 +638,46 @@ async fn run_probe(
             phase: phase.into(),
             message: e.to_string(),
         })
+}
+
+/// Open a (possibly pooled) session and run `command` as the session's
+/// first RPC. If that RPC fails with a stale-session error (issue #83) —
+/// e.g. the pooled session died across a reboot or a transient blip left a
+/// dead entry in the pool — drop it, reconnect with a guaranteed-fresh
+/// session via [`DeviceManager::open_fresh`], and retry the probe exactly
+/// once. Returns the live device plus the probe output so callers can keep
+/// reusing the validated session for follow-on probes.
+///
+/// Only the *first* RPC on a freshly checked-out session needs this guard:
+/// once one RPC round-trips successfully the session is proven live, so any
+/// later failure is a real error and should propagate.
+async fn open_validated(
+    router: &str,
+    dm: Arc<DeviceManager>,
+    command: &str,
+    phase: &'static str,
+    ct: &CancellationToken,
+) -> Result<(crate::device_manager::PooledDevice, String), JmcpError> {
+    let mut dev = select_cancel(ct, dm.open(router)).await?;
+    match select_cancel_raw(ct, dev.cli(command)).await? {
+        Ok(out) => Ok((dev, out)),
+        Err(e) if error_indicates_stale_session(&e.to_string()) => {
+            tracing::warn!(
+                router = %router,
+                phase = phase,
+                error = %e,
+                "upgrade_junos.stale_session: pooled session unusable, reconnecting fresh and retrying once"
+            );
+            drop(dev);
+            let mut fresh = select_cancel(ct, dm.open_fresh(router)).await?;
+            let out = run_probe(&mut fresh, command, phase, ct).await?;
+            Ok((fresh, out))
+        }
+        Err(e) => Err(JmcpError::DeviceProbeFailed {
+            phase: phase.into(),
+            message: e.to_string(),
+        }),
+    }
 }
 
 pub async fn handle(
@@ -880,10 +929,15 @@ async fn run_destructive(
     .await?;
     let phase4_done = Instant::now();
 
-    // Phase 5: post-verify version.
-    let mut dev = select_cancel(ct, dm.open(&args.router_name)).await?;
-    let post_version_output = run_probe(
-        &mut dev,
+    // Phase 5: post-verify version. The device just rebooted, so the
+    // session opened by wait_for_netconf may already be dead by the time we
+    // probe; open_validated reconnects fresh and retries once on a stale
+    // session (#83), making the version match the source of truth for
+    // success rather than letting a post-reboot session blip masquerade as
+    // a failed upgrade.
+    let (dev, post_version_output) = open_validated(
+        &args.router_name,
+        dm.clone(),
         "show version | match Junos:",
         "postverify_probe",
         ct,
@@ -1365,5 +1419,83 @@ mod response_tests {
             .unwrap()
             .iter()
             .any(|x| x.as_str().unwrap().contains("25.4R1.12")));
+    }
+}
+
+/// Classify whether an RPC error against a *pooled* session indicates the
+/// session is dead/stale (peer rebooted, transport dropped, keepalive
+/// probe failed, transient connect failure) and the call should reconnect
+/// with a fresh session and retry once (issue #83). This is broader than
+/// [`install_error_indicates_session_drop`]: it also covers connect-level
+/// failures ("no route to host", "connection refused") so a transient blip
+/// that left a dead entry in the pool self-heals rather than surfacing as a
+/// hard `DeviceProbeFailed`. It must NOT match genuine command/RPC errors
+/// (syntax error, rpc-error) — those are real and must propagate.
+pub fn error_indicates_stale_session(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    [
+        "session expired",
+        "keepalive probe failed",
+        "connection closed",
+        "connection reset",
+        "connection refused",
+        "connection failed",
+        "broken pipe",
+        "unexpected eof",
+        "early eof",
+        "channel closed",
+        "session closed",
+        "no route to host",
+        "transport error",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+#[cfg(test)]
+mod stale_session_classifier_tests {
+    use super::*;
+
+    #[test]
+    fn detects_session_expired_keepalive() {
+        assert!(error_indicates_stale_session(
+            "netconf error: protocol error: session expired: keepalive probe failed"
+        ));
+    }
+
+    #[test]
+    fn detects_no_route_to_host_connect_failure() {
+        assert!(error_indicates_stale_session(
+            "netconf error: transport error: connection failed: SSH connect to 10.0.0.1:22 failed: No route to host"
+        ));
+    }
+
+    #[test]
+    fn detects_connection_reset() {
+        assert!(error_indicates_stale_session("Connection reset by peer"));
+    }
+
+    #[test]
+    fn detects_broken_pipe() {
+        assert!(error_indicates_stale_session("io error: Broken pipe"));
+    }
+
+    #[test]
+    fn does_not_misclassify_syntax_error() {
+        assert!(!error_indicates_stale_session(
+            "error: syntax error, expecting <name>"
+        ));
+    }
+
+    #[test]
+    fn does_not_misclassify_rpc_error() {
+        assert!(!error_indicates_stale_session(
+            "rpc-error: package not found"
+        ));
+    }
+
+    #[test]
+    fn empty_is_not_stale() {
+        assert!(!error_indicates_stale_session(""));
     }
 }
