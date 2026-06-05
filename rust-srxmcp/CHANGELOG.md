@@ -6,6 +6,31 @@ The generic `rust-junosmcp` binary has its own changelog and version line
 
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.4] — 2026-06-05
+
+Security fix for JTAC support-bundle redaction.
+
+### Fixed
+- **#85 — `redact_xml` was a no-op stub, leaking secrets despite
+  `redact=true` (the default).** `collect_jtac_support_bundle` shipped
+  PSKs, `secret`/`simple-password`/`encrypted-password`, SNMP `community`,
+  and `hmac-key` values **in the clear** inside every bundle artefact (the
+  `get-configuration` RPC capture, the generic `request support
+  information` payload, and the `/var/log/*` files added in #82). The
+  manifest's `redacted` flags never tripped. Now implemented: input is
+  gated on `roxmltree` well-formedness, then streamed through `quick-xml`
+  replacing the text content of any element whose namespace-stripped local
+  name is in `REDACT_ELEMENT_NAMES` with `<REDACTED>`, preserving element
+  structure so JTAC can still see *where* a secret was configured. On parse
+  failure the input is returned unchanged (callers treat that as
+  non-fatal).
+
+### Known limitation
+- Redaction is XML-element based, so secrets embedded in plain-text log
+  *lines* still pass through unchanged (a log file fails the XML
+  well-formedness gate and is emitted verbatim). A text-pattern pass for
+  log lines is tracked separately in #85.
+
 ## [0.3.3] — 2026-06-02
 
 Implements JTAC support-bundle log archival (the per-type path's last gap).
