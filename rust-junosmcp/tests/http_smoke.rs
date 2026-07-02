@@ -169,9 +169,19 @@ fn http_post(port: u16, bearer: Option<&str>, session_id: Option<&str>, body: Va
 
 /// Parse the first `data:` line from an SSE stream as JSON.
 fn parse_first_sse_data(sse: &str) -> Option<Value> {
+    // rmcp 2.0.0 prepends an empty "priming" SSE event (`data: ` with no
+    // payload) before the real JSON-RPC payload when `sse_retry` is set
+    // (the default), so skip blank/unparseable `data:` lines instead of
+    // returning on the very first one.
     for line in sse.lines() {
         if let Some(payload) = line.strip_prefix("data:") {
-            return serde_json::from_str(payload.trim()).ok();
+            let payload = payload.trim();
+            if payload.is_empty() {
+                continue;
+            }
+            if let Ok(value) = serde_json::from_str(payload) {
+                return Some(value);
+            }
         }
     }
     None
@@ -453,5 +463,125 @@ fn tool_scope_transfer_only_cannot_call_upgrade_junos() {
     assert!(
         text.contains("not authorized for tool"),
         "expected tool-scope denial for upgrade_junos, got: {text}"
+    );
+}
+
+/// Spawn with `--allow-no-auth` (no auth layer) plus extra CLI args (e.g.
+/// `--allowed-host` / `--disable-host-check`), so rmcp's built-in Host
+/// allowlist is the sole gate in front of `initialize`.
+fn spawn_no_auth(inv_path: &std::path::Path, extra: &[&str]) -> Server {
+    let port = pick_port();
+    let port_s = port.to_string();
+    let mut argv = vec![
+        "-f",
+        inv_path.to_str().unwrap(),
+        "-t",
+        "streamable-http",
+        "-H",
+        "127.0.0.1",
+        "-p",
+        &port_s,
+        "--allow-no-auth",
+    ];
+    argv.extend_from_slice(extra);
+    let mut child = Command::new(binary_path())
+        .args(&argv)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let stderr = child.stderr.take().unwrap();
+    let mut reader = BufReader::new(stderr);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut ready = false;
+    loop {
+        if Instant::now() > deadline {
+            break;
+        }
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                if line.contains("streamable-http listening") {
+                    ready = true;
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if !ready {
+        let _ = child.kill();
+        panic!("server did not start within 15s");
+    }
+    let drain = std::thread::spawn(move || {
+        let mut sink = String::new();
+        loop {
+            sink.clear();
+            match reader.read_line(&mut sink) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    });
+    Server {
+        child,
+        port,
+        _stderr_drain: drain,
+    }
+}
+
+/// POST an `initialize` with an explicit Host header; return the HTTP status.
+fn post_init_with_host(port: u16, host: &str) -> u16 {
+    let req = ureq::post(&format!("http://127.0.0.1:{port}/mcp"))
+        .set("Accept", "application/json, text/event-stream")
+        .set("Host", host);
+    match req.send_json(init_body()) {
+        Ok(resp) => resp.status(),
+        Err(ureq::Error::Status(code, _)) => code,
+        Err(e) => panic!("transport error: {e}"),
+    }
+}
+
+#[test]
+fn disallowed_host_is_rejected_403() {
+    ensure_built();
+    let inv = write_inv(
+        r#"{"r1":{"ip":"203.0.113.1","port":1,"username":"u","auth":{"type":"password","password":"x"}}}"#,
+    );
+    // Default loopback allowlist only; no --allowed-host.
+    let s = spawn_no_auth(inv.path(), &[]);
+    let code = post_init_with_host(s.port, "evil.example.com");
+    assert_eq!(
+        code, 403,
+        "rmcp's built-in Host allowlist must reject a disallowed Host (DNS-rebinding guard)"
+    );
+}
+
+#[test]
+fn allowed_host_flag_permits_custom_host() {
+    ensure_built();
+    let inv = write_inv(
+        r#"{"r1":{"ip":"203.0.113.1","port":1,"username":"u","auth":{"type":"password","password":"x"}}}"#,
+    );
+    let s = spawn_no_auth(inv.path(), &["--allowed-host", "friendly.example.com"]);
+    let code = post_init_with_host(s.port, "friendly.example.com");
+    assert_eq!(
+        code, 200,
+        "an --allowed-host authority must pass rmcp's Host check and reach initialize"
+    );
+}
+
+#[test]
+fn disable_host_check_allows_any_host() {
+    ensure_built();
+    let inv = write_inv(
+        r#"{"r1":{"ip":"203.0.113.1","port":1,"username":"u","auth":{"type":"password","password":"x"}}}"#,
+    );
+    let s = spawn_no_auth(inv.path(), &["--disable-host-check"]);
+    let code = post_init_with_host(s.port, "anything.example");
+    assert_eq!(
+        code, 200,
+        "--disable-host-check must bypass rmcp's Host check"
     );
 }

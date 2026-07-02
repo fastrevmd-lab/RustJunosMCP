@@ -12,10 +12,9 @@ ignore = [
     # Track: https://github.com/Eugeny/russh/issues
     "RUSTSEC-2023-0071",
 
-    # `paste` (proc-macro) marked unmaintained. Reaches us transitively via
-    # rmcp 0.8.5. No security impact; informational only.
-    # Track: https://github.com/modelcontextprotocol/rust-sdk
-    "RUSTSEC-2024-0436",
+    # NOTE: RUSTSEC-2024-0436 (`paste` unmaintained) was removed when rmcp was
+    # upgraded 0.8.5 -> 2.0.0 (#97) — rmcp 2.x replaced `paste` with `pastey`,
+    # so `paste` is no longer in the tree and the ignore was dead.
 
     # NOTE: RUSTSEC-2025-0067 (libyml) and RUSTSEC-2025-0068 (serde_yml)
     # were removed in v0.5.2 (RJMCP-SEC-002). The serde_yml dependency was

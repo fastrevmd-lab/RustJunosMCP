@@ -20,20 +20,42 @@ use rust_junosmcp_auth::TokenStore;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+/// Build the streamable-http server config, applying the Host allowlist policy.
+/// Default = rmcp's loopback-only allowlist (localhost/127.0.0.1/::1); each
+/// `--allowed-host` value extends it. `--disable-host-check` turns the gate off.
+fn build_http_config(
+    allowed_hosts: Vec<String>,
+    disable_host_check: bool,
+) -> StreamableHttpServerConfig {
+    if disable_host_check {
+        tracing::warn!(
+            "--disable-host-check: streamable-http Host allowlist DISABLED; accepting any Host header. \
+             This reintroduces RUSTSEC-2026-0189 (DNS rebinding); bearer auth still applies."
+        );
+        return StreamableHttpServerConfig::default().disable_allowed_hosts();
+    }
+    let mut cfg = StreamableHttpServerConfig::default(); // loopback defaults
+    cfg.allowed_hosts.extend(allowed_hosts);
+    cfg
+}
+
 pub async fn serve(
     handler: JmcpHandler,
     addr: SocketAddr,
     token_store: Option<Arc<ArcSwap<TokenStore>>>,
+    allowed_hosts: Vec<String>,
+    disable_host_check: bool,
     #[cfg(feature = "tls")] tls: Option<Arc<rustls::ServerConfig>>,
 ) -> Result<()> {
     // Factory closure: rmcp wants a fresh handler per session. JmcpHandler
     // is cheap to clone (Arc fields) so we just clone it.
     let handler_factory = move || Ok::<_, std::io::Error>(handler.clone());
 
+    let http_cfg = build_http_config(allowed_hosts, disable_host_check);
     let svc = StreamableHttpService::new(
         handler_factory,
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
+        http_cfg,
     );
 
     let rmcp_router = Router::new().nest_service("/mcp", svc);

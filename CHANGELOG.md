@@ -12,6 +12,14 @@ All notable user-facing changes are recorded here. Format loosely follows
   loads a candidate, returns `{success, diff, error?}`, then discards it.
   Never activates config. Own token scope (least-privilege). Tool surface 15 → 16.
 
+### Security
+
+- Upgrade `rmcp` 0.8.5 → 2.0.0, closing RUSTSEC-2026-0189 (DNS rebinding in the
+  Streamable HTTP transport). The transport now enforces a `Host` allowlist
+  (default: loopback only). New flags `--allowed-host <HOST>` (repeatable) and
+  `--disable-host-check` configure it; off-loopback deployments MUST pass
+  `--allowed-host` for their LAN authority or clients receive HTTP 403.
+
 ## [0.6.3] — 2026-06-03
 
 ### Fixed
