@@ -1,14 +1,14 @@
 //! Cooperative cancellation primitives for the long-running MCP tools
 //! (`upgrade_junos`, `transfer_file`).
 //!
-//! rmcp 0.8.5 exposes a [`CancellationToken`] on every `RequestContext`
+//! rmcp 2.0.0 exposes a [`CancellationToken`] on every `RequestContext`
 //! that fires when the client sends a `notifications/cancelled` JSON-RPC
 //! message or when the server-side request timeout elapses. This module
 //! provides two small helpers that wrap an inner future in a `tokio::select!`
 //! against the token, so every await site in the long-running tools can
 //! short-circuit on cancel without hand-rolling the select form.
 //!
-//! Half B (tracked separately in issue #44): rmcp 0.8.5's streamable-HTTP
+//! Half B (tracked separately in issue #44): rmcp 2.0.0's streamable-HTTP
 //! transport does NOT propagate raw TCP-disconnect to the request token. A
 //! client that simply closes the socket leaves the in-flight tool future
 //! detached, running to natural completion. The helpers in this module

@@ -388,6 +388,30 @@ the same host), add `--allow-insecure-bind`. This flag overrides the TLS
 requirement and should be used with care — only when you have an external
 guarantee of transport security.
 
+### Host allowlist (DNS-rebinding guard)
+
+The streamable-http transport validates the incoming `Host` header against an
+allowlist (default: loopback only — `localhost`, `127.0.0.1`, `::1`). This
+closes RUSTSEC-2026-0189 (DNS rebinding). Off-loopback clients must be
+allowlisted with `--allowed-host <HOST>` (repeatable) or they are rejected
+with HTTP 403, regardless of auth state:
+
+```bash
+cargo run -- \
+  --device-mapping devices.json \
+  --transport streamable-http \
+  -H 0.0.0.0 \
+  -p 8765 \
+  --tokens-file tokens.json \
+  --tls-cert cert.pem \
+  --tls-key key.pem \
+  --allowed-host jmcp.lab.internal
+```
+
+`--disable-host-check` turns the allowlist off entirely (accept any `Host`),
+reintroducing the DNS-rebinding exposure; bearer auth still applies. Off by
+default — only set this if you understand the tradeoff.
+
 ### Hot reload
 
 After revoking or rotating a token, the server reloads the token store without
@@ -463,6 +487,13 @@ Options:
       --allow-password-auth-add
           Permit add_device to accept auth.type=password (mutually exclusive
           with --inventory-readonly)
+      --allowed-host <HOST>
+          Additional Host authorities to accept on the streamable-http
+          endpoint, beyond the loopback defaults (localhost, 127.0.0.1, ::1).
+          Repeatable
+      --disable-host-check
+          Disable the streamable-http Host allowlist entirely (accept any
+          Host). Off by default
   -h, --help
           Print help
   -V, --version
