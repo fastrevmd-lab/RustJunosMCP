@@ -232,25 +232,10 @@ impl Drop for Server {
     }
 }
 
-pub fn spawn(inv_path: &Path, tokens_path: &Path) -> Server {
-    let port = pick_port();
-    let mut child = Command::new(binary_path())
-        .args([
-            "-f",
-            inv_path.to_str().unwrap(),
-            "-t",
-            "streamable-http",
-            "-H",
-            "127.0.0.1",
-            "-p",
-            &port.to_string(),
-            "--tokens-file",
-            tokens_path.to_str().unwrap(),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn");
+/// Wait for the "streamable-http listening" readiness line on the child's
+/// stderr, then spawn a drain thread and return the guarded Server. Panics if
+/// the server doesn't announce within 15s.
+fn finish_spawn(mut child: Child, port: u16) -> Server {
     let stderr = child.stderr.take().unwrap();
     let mut reader = BufReader::new(stderr);
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -295,6 +280,28 @@ pub fn spawn(inv_path: &Path, tokens_path: &Path) -> Server {
     }
 }
 
+pub fn spawn(inv_path: &Path, tokens_path: &Path) -> Server {
+    let port = pick_port();
+    let child = Command::new(binary_path())
+        .args([
+            "-f",
+            inv_path.to_str().unwrap(),
+            "-t",
+            "streamable-http",
+            "-H",
+            "127.0.0.1",
+            "-p",
+            &port.to_string(),
+            "--tokens-file",
+            tokens_path.to_str().unwrap(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    finish_spawn(child, port)
+}
+
 /// Spawn with `--allow-no-auth` (no auth layer) plus extra CLI args (e.g.
 /// `--allowed-host` / `--disable-host-check`), so rmcp's built-in Host
 /// allowlist is the sole gate in front of `initialize`.
@@ -313,51 +320,13 @@ pub fn spawn_no_auth(inv_path: &Path, extra: &[&str]) -> Server {
         "--allow-no-auth",
     ];
     argv.extend_from_slice(extra);
-    let mut child = Command::new(binary_path())
+    let child = Command::new(binary_path())
         .args(&argv)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn");
-    let stderr = child.stderr.take().unwrap();
-    let mut reader = BufReader::new(stderr);
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let mut ready = false;
-    loop {
-        if Instant::now() > deadline {
-            break;
-        }
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => {
-                if line.contains("streamable-http listening") {
-                    ready = true;
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    if !ready {
-        let _ = child.kill();
-        panic!("server did not start within 15s");
-    }
-    let drain = std::thread::spawn(move || {
-        let mut sink = String::new();
-        loop {
-            sink.clear();
-            match reader.read_line(&mut sink) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-        }
-    });
-    Server {
-        child,
-        port,
-        _stderr_drain: drain,
-    }
+    finish_spawn(child, port)
 }
 
 /// Outcome of a streamable-http POST: status, body parsed as JSON-RPC payload
