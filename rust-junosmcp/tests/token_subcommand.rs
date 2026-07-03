@@ -1,28 +1,9 @@
 //! Spawn the `rust-junosmcp` binary and exercise the `token` subcommand.
 
-use std::path::PathBuf;
 use std::process::Command;
 
-fn binary_path() -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop();
-    p.push("target");
-    p.push(if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    });
-    p.push("rust-junosmcp");
-    p
-}
-
-fn ensure_built() {
-    let s = Command::new("cargo")
-        .args(["build", "-p", "rust-junosmcp"])
-        .status()
-        .unwrap();
-    assert!(s.success());
-}
+mod common;
+use common::{binary_path, ensure_built};
 
 #[test]
 fn add_then_list_reports_name_no_secret() {

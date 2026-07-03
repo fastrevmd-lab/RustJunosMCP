@@ -8,19 +8,7 @@
 
 mod common;
 use common::{call_tool, spawn_stdio_server_with_args, write_inventory_in};
-use serde_json::{json, Value};
-
-/// `common::call_tool` already unwraps `result.content[0].text` into the
-/// parsed tool payload for success responses; this only guards against an
-/// accidental `isError` marker slipping through unnoticed.
-fn extract_success_payload(resp: &Value) -> Value {
-    assert_ne!(
-        resp.get("isError"),
-        Some(&json!(true)),
-        "tool returned isError=true: {resp}"
-    );
-    resp.clone()
-}
+use serde_json::json;
 
 #[test]
 fn render_only_path_returns_rendered_string_with_json_vars() {
@@ -31,7 +19,7 @@ fn render_only_path_returns_rendered_string_with_json_vars() {
         r#"{"r1":{"ip":"127.0.0.1","username":"u","auth":{"type":"password","password":"x"}}}"#,
     );
     let mut child = spawn_stdio_server_with_args(&["-f", inv_path.to_str().unwrap()]);
-    let resp = call_tool(
+    let payload = call_tool(
         &mut child,
         "render_and_apply_j2_template",
         json!({
@@ -40,7 +28,6 @@ fn render_only_path_returns_rendered_string_with_json_vars() {
             "router_name": "r1"
         }),
     );
-    let payload = extract_success_payload(&resp);
     let rows = payload["results"].as_array().expect("results array");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["rendered_template"], "set system host-name r1");

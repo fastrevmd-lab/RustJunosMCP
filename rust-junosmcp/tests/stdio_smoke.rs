@@ -1,6 +1,8 @@
 //! Spawn the `rust-junosmcp` binary, send MCP `initialize` + `tools/list` over
 //! stdin, parse responses on stdout, assert we advertise the 17 tools.
 
+mod common;
+use common::binary_path;
 use serde_json::{json, Value};
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -25,19 +27,6 @@ const EXPECTED_TOOLS: &[&str] = &[
     "list_staged_files",
     "upgrade_junos",
 ];
-
-fn binary_path() -> std::path::PathBuf {
-    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop(); // workspace root
-    p.push("target");
-    p.push(if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    });
-    p.push("rust-junosmcp");
-    p
-}
 
 #[test]
 fn lists_seventeen_tools() {
