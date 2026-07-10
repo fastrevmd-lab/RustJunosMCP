@@ -6,6 +6,16 @@ The generic `rust-junosmcp` binary has its own changelog and version line
 
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **#125 - support-bundle path traversal through caller-controlled IDs.**
+  Caller `request_id` values are now short ASCII correlation labels only;
+  filesystem paths use an independent server-minted UUID. Router, request,
+  RPC artefact, and device-log components are validated before path creation.
+  Staging rejects symlink escapes, creates tarballs without following existing
+  destinations, and removes scratch or partial archive files on every error.
+
 ## [0.3.6] — 2026-06-05
 
 Security follow-up to [0.3.5]: closes two redaction gaps found by a live

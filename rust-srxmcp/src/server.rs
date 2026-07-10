@@ -554,8 +554,9 @@ impl JmcpSrxHandler {
                        the tarball on LXC 601 under JMCP_SRX_STAGING_DIR (default \
                        /var/lib/rust-srxmcp/staging/bundles/<router>/srxmcp-<rid>.tgz). \
                        The response's bundle.location field is 'device' or 'lxc_staging'. \
-                       Caller-supplied request_id propagates to the on-device filename and \
-                       all audit log lines; if absent, a srxmcp-<uuid> is minted. \
+                       Caller-supplied request_id is a validated correlation label used only \
+                       in response metadata and audit logs. Filesystem paths always use a \
+                       separate server-minted srxmcp-<uuid> returned as filesystem_id. \
                        Concurrent calls against the same router serialize on an in-process \
                        per-router semaphore and surface contention as \
                        [code=bundle_per_router_contention]. v0.3.0 gap: log archival in the \
@@ -574,6 +575,8 @@ impl JmcpSrxHandler {
         ) {
             return Self::scope_to_call_result(e);
         }
+        rust_srxmcp_core::workflows::support_bundle::validate_path_inputs(&args)
+            .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))?;
         let mut device =
             self.device_manager.open(&args.router).await.map_err(|e| {
                 rmcp::ErrorData::internal_error(format!("opening device: {e}"), None)
