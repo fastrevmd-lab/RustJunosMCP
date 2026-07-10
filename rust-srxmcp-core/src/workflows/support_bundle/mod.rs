@@ -50,9 +50,9 @@ pub use redact::{
     redact_log_artefact, redact_log_text, redact_xml, REDACTED_MARKER, REDACT_ELEMENT_NAMES,
 };
 pub use staging::{
-    bundle_manifest_path, bundle_tarball_path, device_tarball_path, enforce_staging_cap,
-    router_staging_dir, staging_dir_from_env, staging_max_bytes_from_env, DEFAULT_STAGING_DIR,
-    DEFAULT_STAGING_MAX_BYTES,
+    bundle_manifest_path, bundle_tarball_path, device_log_tarball_path, device_tarball_path,
+    enforce_staging_cap, router_staging_dir, staging_dir_from_env, staging_max_bytes_from_env,
+    validate_path_component, PreparedBundlePaths, DEFAULT_STAGING_DIR, DEFAULT_STAGING_MAX_BYTES,
 };
 
 use crate::{SrxError, SrxToolResponse};
@@ -116,6 +116,8 @@ pub struct SupportBundleArgs {
     #[serde(alias = "router_name")]
     pub router: String,
     pub problem_type: ProblemTypeArg,
+    /// Optional correlation label. Limited to 1..=64 ASCII letters, digits,
+    /// `_`, `.`, and `-`; never used in a filesystem path.
     #[serde(default)]
     pub request_id: Option<String>,
     #[serde(default = "default_true")]
@@ -144,6 +146,41 @@ fn default_max_log_files() -> u32 {
 }
 fn default_timeout() -> u64 {
     1800
+}
+
+fn validate_correlation_id(request_id: &str) -> Result<(), SrxError> {
+    if request_id.trim().is_empty() {
+        return Err(SrxError::InvalidInput(
+            "request_id must not be empty or whitespace".into(),
+        ));
+    }
+    validate_path_component("request_id", request_id)?;
+    let normalized = request_id.strip_prefix("srxmcp-").unwrap_or(request_id);
+    validate_path_component("request_id", normalized)
+}
+
+fn effective_request_id(
+    caller_request_id: Option<&str>,
+    filesystem_id: &str,
+) -> Result<String, SrxError> {
+    match caller_request_id {
+        Some(raw) => {
+            validate_correlation_id(raw)?;
+            Ok(raw.to_string())
+        }
+        None => Ok(filesystem_id.to_string()),
+    }
+}
+
+/// Validate every caller or inventory value that can influence bundle paths.
+/// The binary calls this before opening a device so malformed input fails
+/// deterministically without network access.
+pub fn validate_path_inputs(args: &SupportBundleArgs) -> Result<(), SrxError> {
+    validate_path_component("router", &args.router)?;
+    if let Some(request_id) = args.request_id.as_deref() {
+        validate_correlation_id(request_id)?;
+    }
+    Ok(())
 }
 
 /// Where the assembled tarball lives. `Device` → on the SRX under
@@ -177,6 +214,8 @@ pub struct SupportBundleData {
     #[serde(alias = "router_name")]
     pub router: String,
     pub request_id: String,
+    /// Server-minted ID used exclusively for local and device filenames.
+    pub filesystem_id: String,
     pub bundle: BundleInfo,
     /// Free-form next-step hint for the LLM. For `Device` bundles this is
     /// the `fetch_file router=... source=...` invocation; for
@@ -209,12 +248,10 @@ pub async fn run(
             "problem_type must contain at least one value".into(),
         ));
     }
-    let request_id = args
-        .request_id
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(mint_request_id);
+    validate_path_inputs(&args)?;
     let router = args.router.clone();
+    let filesystem_id = mint_filesystem_id();
+    let request_id = effective_request_id(args.request_id.as_deref(), &filesystem_id)?;
 
     // Acquire the staging-key lock (per-router serialization). Use
     // try_acquire to surface contention as a typed error instead of
@@ -231,6 +268,7 @@ pub async fn run(
     tracing::info!(
         target: "audit",
         request_id = %request_id,
+        filesystem_id = %filesystem_id,
         router = %router,
         tool = "collect_jtac_support_bundle",
         problem_types = ?problem_types,
@@ -243,9 +281,17 @@ pub async fn run(
     // Generic short-circuit: any presence of Generic in the set means we
     // skip everything else and run `request support information`.
     let result = if problem_types.contains(&ProblemType::Generic) {
-        collect_generic(device, &router, &request_id, &args).await
+        collect_generic(device, &router, &request_id, &filesystem_id, &args).await
     } else {
-        collect_per_type(device, &router, &request_id, &args, &problem_types).await
+        collect_per_type(
+            device,
+            &router,
+            &request_id,
+            &filesystem_id,
+            &args,
+            &problem_types,
+        )
+        .await
     };
 
     let elapsed_secs = started_at.elapsed().as_secs();
@@ -254,6 +300,7 @@ pub async fn run(
             tracing::info!(
                 target: "audit",
                 request_id = %request_id,
+                filesystem_id = %filesystem_id,
                 router = %router,
                 tool = "collect_jtac_support_bundle",
                 elapsed_secs,
@@ -267,6 +314,7 @@ pub async fn run(
             tracing::warn!(
                 target: "audit",
                 request_id = %request_id,
+                filesystem_id = %filesystem_id,
                 router = %router,
                 tool = "collect_jtac_support_bundle",
                 elapsed_secs,
@@ -284,18 +332,11 @@ async fn collect_generic(
     device: &mut PooledDevice,
     router: &str,
     request_id: &str,
+    filesystem_id: &str,
     args: &SupportBundleArgs,
 ) -> Result<SupportBundleData, SrxError> {
-    let staging_root = router_staging_dir(router);
-    std::fs::create_dir_all(&staging_root).map_err(|e| {
-        SrxError::InvalidInput(format!(
-            "cannot create staging dir {}: {e}",
-            staging_root.display()
-        ))
-    })?;
-    let scratch = staging_root.join(format!("srxmcp-{request_id}-scratch"));
-    std::fs::create_dir_all(&scratch)
-        .map_err(|e| SrxError::InvalidInput(format!("cannot create scratch dir: {e}")))?;
+    let mut paths = PreparedBundlePaths::prepare(router, filesystem_id)?;
+    let scratch = paths.scratch_dir().to_path_buf();
 
     let mut exec = device
         .rpc()
@@ -319,7 +360,6 @@ async fn collect_generic(
         .map_err(|e| SrxError::Transport(rust_junosmcp_core::JmcpError::from(e)))?;
 
     if payload.trim().is_empty() {
-        let _ = std::fs::remove_dir_all(&scratch);
         return Err(SrxError::BundleConfigCaptureFailed {
             router: router.to_string(),
             detail: "`request support information` returned no output".into(),
@@ -356,8 +396,8 @@ async fn collect_generic(
     finalize_lxc_bundle(
         router,
         request_id,
-        &staging_root,
-        &scratch,
+        filesystem_id,
+        &mut paths,
         artefacts,
         &problem_types,
         redacted,
@@ -370,19 +410,12 @@ async fn collect_per_type(
     device: &mut PooledDevice,
     router: &str,
     request_id: &str,
+    filesystem_id: &str,
     args: &SupportBundleArgs,
     problem_types: &BTreeSet<ProblemType>,
 ) -> Result<SupportBundleData, SrxError> {
-    let staging_root = router_staging_dir(router);
-    std::fs::create_dir_all(&staging_root).map_err(|e| {
-        SrxError::InvalidInput(format!(
-            "cannot create staging dir {}: {e}",
-            staging_root.display()
-        ))
-    })?;
-
-    // Per-bundle scratch dir we'll tar up afterwards.
-    let scratch = staging_root.join(format!("srxmcp-{request_id}-scratch"));
+    let mut paths = PreparedBundlePaths::prepare(router, filesystem_id)?;
+    let scratch = paths.scratch_dir().to_path_buf();
     let rpc_dir = scratch.join("rpc");
     std::fs::create_dir_all(&rpc_dir)
         .map_err(|e| SrxError::InvalidInput(format!("cannot create scratch dir: {e}")))?;
@@ -444,7 +477,7 @@ async fn collect_per_type(
             (raw, false)
         };
 
-        let fname = sanitize_rpc_filename(rpc, inner);
+        let fname = sanitize_rpc_filename(rpc, inner)?;
         let abs_path = rpc_dir.join(&fname);
         std::fs::write(&abs_path, payload.as_bytes())
             .map_err(|e| SrxError::InvalidInput(format!("write {}: {e}", abs_path.display())))?;
@@ -484,7 +517,8 @@ async fn collect_per_type(
         let cap_bytes = args.max_log_bytes_per_file as usize;
         let mut captured: u32 = 0;
         for path in all_logs {
-            let rel = format!("logs/{}", path.trim_start_matches('/'));
+            let rel = device_log_tarball_path(path)?;
+            let rel_display = path_to_string(&rel);
             // Enforce the count cap: record a skip marker so JTAC sees
             // which logs were intentionally omitted.
             if captured >= args.max_log_files {
@@ -492,7 +526,7 @@ async fn collect_per_type(
                     source: ArtefactSource::LogFile {
                         device_path: path.to_string(),
                     },
-                    tarball_path: rel,
+                    tarball_path: rel_display,
                     sha256: String::new(),
                     bytes_in_tarball: 0,
                     redacted: false,
@@ -511,7 +545,7 @@ async fn collect_per_type(
                         source: ArtefactSource::LogFile {
                             device_path: path.to_string(),
                         },
-                        tarball_path: rel,
+                        tarball_path: rel_display,
                         sha256: String::new(),
                         bytes_in_tarball: 0,
                         redacted: false,
@@ -528,7 +562,7 @@ async fn collect_per_type(
                     source: ArtefactSource::LogFile {
                         device_path: path.to_string(),
                     },
-                    tarball_path: rel,
+                    tarball_path: rel_display,
                     sha256: String::new(),
                     bytes_in_tarball: 0,
                     redacted: false,
@@ -567,7 +601,7 @@ async fn collect_per_type(
                 source: ArtefactSource::LogFile {
                     device_path: path.to_string(),
                 },
-                tarball_path: rel,
+                tarball_path: rel_display,
                 sha256: sha256_hex(payload.as_bytes()),
                 bytes_in_tarball: payload.len() as u64,
                 redacted,
@@ -600,8 +634,8 @@ async fn collect_per_type(
     finalize_lxc_bundle(
         router,
         request_id,
-        &staging_root,
-        &scratch,
+        filesystem_id,
+        &mut paths,
         artefacts,
         problem_types,
         any_redacted,
@@ -618,15 +652,21 @@ async fn collect_per_type(
 fn finalize_lxc_bundle(
     router: &str,
     request_id: &str,
-    staging_root: &Path,
-    scratch: &Path,
+    filesystem_id: &str,
+    paths: &mut PreparedBundlePaths,
     artefacts: Vec<CapturedArtefact>,
     problem_types: &BTreeSet<ProblemType>,
     any_redacted: bool,
 ) -> Result<SupportBundleData, SrxError> {
+    paths.ensure_confined()?;
+    let scratch = paths.scratch_dir().to_path_buf();
+    let router_dir = paths.router_dir().to_path_buf();
+    let tarball_path = paths.tarball_path().to_path_buf();
+
     // Write manifest.json into the scratch dir so it lands in the tarball.
     let manifest_json = serde_json::json!({
         "request_id": request_id,
+        "filesystem_id": filesystem_id,
         "router": router,
         "problem_types": problem_types,
         "artefacts": &artefacts,
@@ -640,15 +680,18 @@ fn finalize_lxc_bundle(
     )
     .map_err(|e| SrxError::InvalidInput(format!("write manifest: {e}")))?;
 
-    // Assemble the tarball with the system `tar` (avoids adding a
-    // flate2 + tar dep to rust-srxmcp-core for one call site).
-    let tarball_path = bundle_tarball_path(router, request_id);
+    // Stream tar output into an already-opened create-new file. This keeps
+    // caller-controlled data out of the archive pathname and prevents tar
+    // from following a pre-existing symlink at the destination.
+    let tarball_file = paths.create_tarball()?;
     let out = std::process::Command::new("tar")
         .arg("-czf")
-        .arg(&tarball_path)
+        .arg("-")
         .arg("-C")
-        .arg(staging_root)
+        .arg(&router_dir)
+        .arg("--")
         .arg(scratch.file_name().expect("scratch dir name"))
+        .stdout(std::process::Stdio::from(tarball_file))
         .output()
         .map_err(|e| SrxError::InvalidInput(format!("tar invoke failed: {e}")))?;
     if !out.status.success() {
@@ -658,9 +701,6 @@ fn finalize_lxc_bundle(
             out.status
         )));
     }
-
-    // Clean up the scratch dir; the tarball is the bundle.
-    let _ = std::fs::remove_dir_all(scratch);
 
     // Enforce staging cap (LRU eviction) — stub today.
     let cap = staging_max_bytes_from_env();
@@ -673,6 +713,7 @@ fn finalize_lxc_bundle(
         Ok(bytes) => sha256_hex(&bytes),
         Err(_) => String::new(),
     };
+    paths.commit_tarball();
 
     let bundle = BundleInfo {
         location: BundleLocation::LxcStaging,
@@ -690,14 +731,16 @@ fn finalize_lxc_bundle(
     Ok(SupportBundleData {
         router: router.to_string(),
         request_id: request_id.to_string(),
+        filesystem_id: filesystem_id.to_string(),
         bundle,
         next_step,
         elapsed_secs: 0,
     })
 }
 
-fn sanitize_rpc_filename(rpc: &str, inner: &str) -> String {
-    if inner.is_empty() {
+fn sanitize_rpc_filename(rpc: &str, inner: &str) -> Result<String, SrxError> {
+    validate_path_component("RPC name", rpc)?;
+    let filename = if inner.is_empty() {
         format!("{rpc}.xml")
     } else {
         // Strip <> and / from inner so we get something like
@@ -707,7 +750,9 @@ fn sanitize_rpc_filename(rpc: &str, inner: &str) -> String {
             .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
             .collect();
         format!("{rpc}.{suffix}.xml")
-    }
+    };
+    validate_path_component("RPC artifact filename", &filename)?;
+    Ok(filename)
 }
 
 fn path_to_string(p: &Path) -> String {
@@ -729,7 +774,7 @@ fn truncate_to_char_boundary(s: &mut String, cap: usize) -> bool {
     true
 }
 
-fn mint_request_id() -> String {
+fn mint_filesystem_id() -> String {
     format!("srxmcp-{}", uuid::Uuid::new_v4())
 }
 
@@ -775,13 +820,48 @@ mod tests {
     #[test]
     fn sanitize_rpc_filename_with_and_without_args() {
         assert_eq!(
-            sanitize_rpc_filename("get-configuration", ""),
+            sanitize_rpc_filename("get-configuration", "").unwrap(),
             "get-configuration.xml"
         );
         assert_eq!(
-            sanitize_rpc_filename("get-flow-session-information", "<summary/>"),
+            sanitize_rpc_filename("get-flow-session-information", "<summary/>").unwrap(),
             "get-flow-session-information.summary.xml"
         );
+        assert!(sanitize_rpc_filename("../../escape", "").is_err());
+    }
+
+    #[test]
+    fn caller_request_ids_are_metadata_only_but_still_validated() {
+        let filesystem_id = "srxmcp-12345678-1234-1234-1234-123456789abc";
+        assert_eq!(
+            effective_request_id(Some("incident-123"), filesystem_id).unwrap(),
+            "incident-123"
+        );
+        assert_eq!(
+            effective_request_id(None, filesystem_id).unwrap(),
+            filesystem_id
+        );
+
+        let long = "x".repeat(staging::MAX_PATH_COMPONENT_BYTES + 1);
+        for bad in [
+            "",
+            " ",
+            ".",
+            "..",
+            "../escape",
+            "/absolute",
+            "a/b",
+            "a\\b",
+            "line\nbreak",
+            "srxmcp-",
+            "srxmcp-.",
+            &long,
+        ] {
+            assert!(
+                effective_request_id(Some(bad), filesystem_id).is_err(),
+                "accepted {bad:?}"
+            );
+        }
     }
 
     #[test]
@@ -834,17 +914,13 @@ mod tests {
     // non-empty, hashed `lxc_staging` bundle.
     #[test]
     fn finalize_lxc_bundle_produces_nonempty_tarball() {
-        let tmp = std::env::temp_dir().join(format!("srxmcp-test-{}", mint_request_id()));
-        std::fs::create_dir_all(&tmp).expect("tmp dir");
-        // Safe under edition 2021; no other test mutates this var.
-        std::env::set_var("JMCP_SRX_STAGING_DIR", &tmp);
-
+        let tmp = tempfile::tempdir().expect("tmp dir");
         let router = "vSRX-finalize-unit";
         let request_id = "srxmcp-unit-0001";
-        let staging_root = router_staging_dir(router);
-        std::fs::create_dir_all(&staging_root).expect("staging root");
-        let scratch = staging_root.join(format!("srxmcp-{request_id}-scratch"));
-        std::fs::create_dir_all(&scratch).expect("scratch");
+        let filesystem_id = "srxmcp-12345678-1234-1234-1234-123456789abc";
+        let mut paths =
+            PreparedBundlePaths::prepare_under(tmp.path(), router, filesystem_id).unwrap();
+        let scratch = paths.scratch_dir().to_path_buf();
         let payload = b"hello tech-support output";
         std::fs::write(scratch.join("request-support-information.txt"), payload).expect("write");
 
@@ -865,8 +941,8 @@ mod tests {
         let data = finalize_lxc_bundle(
             router,
             request_id,
-            &staging_root,
-            &scratch,
+            filesystem_id,
+            &mut paths,
             artefacts,
             &problem_types,
             false,
@@ -880,9 +956,9 @@ mod tests {
         );
         assert_eq!(data.bundle.sha256.len(), 64);
         assert!(Path::new(&data.bundle.path).exists());
+        assert_eq!(data.request_id, request_id);
+        assert_eq!(data.filesystem_id, filesystem_id);
+        drop(paths);
         assert!(!scratch.exists(), "scratch dir should be cleaned up");
-
-        std::env::remove_var("JMCP_SRX_STAGING_DIR");
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
