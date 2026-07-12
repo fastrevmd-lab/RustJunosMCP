@@ -9,3 +9,4 @@ mod session;
 pub use config::LimitsConfig;
 pub use concurrency::{apply_body_limit, concurrency_middleware, ConcurrencyState};
 pub use overload::overload_response;
+pub use session::{LimitedSessionManager, SessionTracker};
