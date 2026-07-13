@@ -1,11 +1,11 @@
 //! `JmcpSrxHandler` — rmcp `#[tool]` registry root for `rust-srxmcp`.
 
 use rmcp::handler::server::wrapper::Parameters;
-use rust_junosmcp_audit::AuditScope;
 use rmcp::model::{
     CallToolResult, ContentBlock, Extensions, Implementation, ServerCapabilities, ServerInfo,
 };
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
+use rust_junosmcp_audit::AuditScope;
 use rust_junosmcp_core::{DeviceLeaseManager, DeviceManager};
 use rust_srxmcp_core::workflows::signature_package::{
     confirmation_token_for_request, ConfirmationBinding, ConfirmationStore,
@@ -302,7 +302,12 @@ impl JmcpSrxHandler {
         extensions: Extensions,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = caller_ctx(&extensions);
-        let mut audit = AuditScope::new(ctx, "get_chassis_cluster_status", "read", vec![args.router.clone()]);
+        let mut audit = AuditScope::new(
+            ctx,
+            "get_chassis_cluster_status",
+            "read",
+            vec![args.router.clone()],
+        );
 
         if let Err(e) = self.authorize_call(
             &extensions,
@@ -354,7 +359,12 @@ impl JmcpSrxHandler {
         extensions: Extensions,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = caller_ctx(&extensions);
-        let mut audit = AuditScope::new(ctx, "get_srx_security_services_status", "read", vec![args.router.clone()]);
+        let mut audit = AuditScope::new(
+            ctx,
+            "get_srx_security_services_status",
+            "read",
+            vec![args.router.clone()],
+        );
 
         if let Err(e) = self.authorize_call(
             &extensions,
@@ -407,7 +417,12 @@ impl JmcpSrxHandler {
         extensions: Extensions,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = caller_ctx(&extensions);
-        let mut audit = AuditScope::new(ctx, "check_srx_feature_license", "read", vec![args.router.clone()]);
+        let mut audit = AuditScope::new(
+            ctx,
+            "check_srx_feature_license",
+            "read",
+            vec![args.router.clone()],
+        );
 
         audit.meta("feature", format!("{:?}", args.feature));
 
@@ -460,7 +475,12 @@ impl JmcpSrxHandler {
         extensions: Extensions,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = caller_ctx(&extensions);
-        let mut audit = AuditScope::new(ctx, "vpn_lifecycle_report", "read", vec![args.router.clone()]);
+        let mut audit = AuditScope::new(
+            ctx,
+            "vpn_lifecycle_report",
+            "read",
+            vec![args.router.clone()],
+        );
 
         if let Err(e) = self.authorize_call(&extensions, "vpn_lifecycle_report", Some(&args.router))
         {
@@ -517,7 +537,12 @@ impl JmcpSrxHandler {
         extensions: Extensions,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx_opt = caller_ctx(&extensions);
-        let mut audit = AuditScope::new(ctx_opt, "manage_idp_security_package", "idp-package", vec![args.router.clone()]);
+        let mut audit = AuditScope::new(
+            ctx_opt,
+            "manage_idp_security_package",
+            "idp-package",
+            vec![args.router.clone()],
+        );
 
         audit.meta("action", format!("{:?}", args.action));
         if let Some(ref version) = args.version {
@@ -603,7 +628,12 @@ impl JmcpSrxHandler {
         extensions: Extensions,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx_opt = caller_ctx(&extensions);
-        let mut audit = AuditScope::new(ctx_opt, "manage_appid_signature_package", "appid-package", vec![args.router.clone()]);
+        let mut audit = AuditScope::new(
+            ctx_opt,
+            "manage_appid_signature_package",
+            "appid-package",
+            vec![args.router.clone()],
+        );
 
         audit.meta("action", format!("{:?}", args.action));
 
@@ -683,7 +713,12 @@ impl JmcpSrxHandler {
         extensions: Extensions,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = caller_ctx(&extensions);
-        let mut audit = AuditScope::new(ctx, "validate_chassis_cluster_health", "read", vec![args.router.clone()]);
+        let mut audit = AuditScope::new(
+            ctx,
+            "validate_chassis_cluster_health",
+            "read",
+            vec![args.router.clone()],
+        );
 
         if let Err(e) = self.authorize_call(
             &extensions,
@@ -749,7 +784,12 @@ impl JmcpSrxHandler {
         extensions: Extensions,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = caller_ctx(&extensions);
-        let mut audit = AuditScope::new(ctx, "collect_jtac_support_bundle", "collect", vec![args.router.clone()]);
+        let mut audit = AuditScope::new(
+            ctx,
+            "collect_jtac_support_bundle",
+            "collect",
+            vec![args.router.clone()],
+        );
 
         if let Err(e) = self.authorize_call(
             &extensions,

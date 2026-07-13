@@ -5,12 +5,11 @@
 //! the `Result<serde_json::Value, JmcpError>` into the appropriate rmcp content.
 
 use rmcp::handler::server::wrapper::Parameters;
-use rust_junosmcp_audit::AuditScope;
-use sha2::{Digest, Sha256};
 use rmcp::model::{
     CallToolResult, ContentBlock, Extensions, Implementation, ServerCapabilities, ServerInfo,
 };
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
+use rust_junosmcp_audit::AuditScope;
 use rust_junosmcp_core::{
     tools::{
         add_device, batch, commit_check, config_diff, discard_candidate, execute_command, facts,
@@ -23,6 +22,7 @@ use rust_junosmcp_core::{
     DeviceManager, Policy,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 /// Look up the per-request `CallerCtx` (inserted by the auth middleware on
@@ -252,7 +252,11 @@ impl JmcpHandler {
         let result = router_list::handle_names(names).await;
         match &result {
             Ok(v) => {
-                if let Some(arr) = v.as_object().and_then(|o| o.get("names")).and_then(|n| n.as_array()) {
+                if let Some(arr) = v
+                    .as_object()
+                    .and_then(|o| o.get("names"))
+                    .and_then(|n| n.as_array())
+                {
                     audit.meta("count", arr.len() as u64);
                 }
                 audit.succeed();
@@ -272,7 +276,12 @@ impl JmcpHandler {
         extensions: Extensions,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = caller_ctx(&extensions);
-        let mut audit = AuditScope::new(ctx, "gather_device_facts", "read", vec![args.router_name.clone()]);
+        let mut audit = AuditScope::new(
+            ctx,
+            "gather_device_facts",
+            "read",
+            vec![args.router_name.clone()],
+        );
 
         if let Err(e) = self.check_tool_scope(ctx, "gather_device_facts") {
             audit.deny("tool_scope");
@@ -304,7 +313,12 @@ impl JmcpHandler {
         extensions: Extensions,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = caller_ctx(&extensions);
-        let mut audit = AuditScope::new(ctx, "execute_junos_command", "execute", vec![args.router_name.clone()]);
+        let mut audit = AuditScope::new(
+            ctx,
+            "execute_junos_command",
+            "execute",
+            vec![args.router_name.clone()],
+        );
 
         if let Err(e) = self.check_tool_scope(ctx, "execute_junos_command") {
             audit.deny("tool_scope");
@@ -337,7 +351,12 @@ impl JmcpHandler {
         extensions: Extensions,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = caller_ctx(&extensions);
-        let mut audit = AuditScope::new(ctx, "get_junos_config", "read", vec![args.router_name.clone()]);
+        let mut audit = AuditScope::new(
+            ctx,
+            "get_junos_config",
+            "read",
+            vec![args.router_name.clone()],
+        );
 
         if let Err(e) = self.check_tool_scope(ctx, "get_junos_config") {
             audit.deny("tool_scope");
@@ -369,7 +388,12 @@ impl JmcpHandler {
         extensions: Extensions,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = caller_ctx(&extensions);
-        let mut audit = AuditScope::new(ctx, "junos_config_diff", "read", vec![args.router_name.clone()]);
+        let mut audit = AuditScope::new(
+            ctx,
+            "junos_config_diff",
+            "read",
+            vec![args.router_name.clone()],
+        );
 
         if let Err(e) = self.check_tool_scope(ctx, "junos_config_diff") {
             audit.deny("tool_scope");
@@ -402,7 +426,12 @@ impl JmcpHandler {
         ct: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = caller_ctx(&extensions);
-        let mut audit = AuditScope::new(ctx, "load_and_commit_config", "commit", vec![args.router_name.clone()]);
+        let mut audit = AuditScope::new(
+            ctx,
+            "load_and_commit_config",
+            "commit",
+            vec![args.router_name.clone()],
+        );
 
         if let Err(e) = self.check_tool_scope(ctx, "load_and_commit_config") {
             audit.deny("tool_scope");
@@ -423,7 +452,9 @@ impl JmcpHandler {
         }
         audit.meta("comment_present", !args.commit_comment.is_empty());
 
-        let result = load_commit::handle_with_cancel(args, self.dm.clone(), self.policy.load_full(), ct).await;
+        let result =
+            load_commit::handle_with_cancel(args, self.dm.clone(), self.policy.load_full(), ct)
+                .await;
         match &result {
             Ok(_) => audit.succeed(),
             Err(e) => audit.fail(e),
@@ -442,7 +473,12 @@ impl JmcpHandler {
         ct: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = caller_ctx(&extensions);
-        let mut audit = AuditScope::new(ctx, "commit_check_config", "commit-check", vec![args.router_name.clone()]);
+        let mut audit = AuditScope::new(
+            ctx,
+            "commit_check_config",
+            "commit-check",
+            vec![args.router_name.clone()],
+        );
 
         if let Err(e) = self.check_tool_scope(ctx, "commit_check_config") {
             audit.deny("tool_scope");
@@ -459,7 +495,9 @@ impl JmcpHandler {
         let hash = format!("{:x}", hasher.finalize());
         audit.meta("config_sha256", hash);
 
-        let result = commit_check::handle_with_cancel(args, self.dm.clone(), self.policy.load_full(), ct).await;
+        let result =
+            commit_check::handle_with_cancel(args, self.dm.clone(), self.policy.load_full(), ct)
+                .await;
         match &result {
             Ok(_) => audit.succeed(),
             Err(e) => audit.fail(e),
@@ -478,7 +516,12 @@ impl JmcpHandler {
         ct: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = caller_ctx(&extensions);
-        let mut audit = AuditScope::new(ctx, "discard_candidate", "discard", vec![args.router_name.clone()]);
+        let mut audit = AuditScope::new(
+            ctx,
+            "discard_candidate",
+            "discard",
+            vec![args.router_name.clone()],
+        );
 
         if let Err(e) = self.check_tool_scope(ctx, "discard_candidate") {
             audit.deny("tool_scope");
@@ -507,13 +550,19 @@ impl JmcpHandler {
         extensions: Extensions,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = caller_ctx(&extensions);
-        let mut audit = AuditScope::new(ctx, "execute_junos_pfe_command", "execute", vec![args.router_name.clone()]);
+        let mut audit = AuditScope::new(
+            ctx,
+            "execute_junos_pfe_command",
+            "execute",
+            vec![args.router_name.clone()],
+        );
 
         if let Err(e) = self.check_tool_scope(ctx, "execute_junos_pfe_command") {
             audit.deny("tool_scope");
             return Self::scope_to_call_result(e);
         }
-        if let Err(e) = self.check_router_scope(ctx, "execute_junos_pfe_command", &args.router_name) {
+        if let Err(e) = self.check_router_scope(ctx, "execute_junos_pfe_command", &args.router_name)
+        {
             audit.deny("router_scope");
             return Self::scope_to_call_result(e);
         }
@@ -540,7 +589,12 @@ impl JmcpHandler {
         extensions: Extensions,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = caller_ctx(&extensions);
-        let mut audit = AuditScope::new(ctx, "execute_junos_command_batch", "execute-batch", args.routers.clone());
+        let mut audit = AuditScope::new(
+            ctx,
+            "execute_junos_command_batch",
+            "execute-batch",
+            args.routers.clone(),
+        );
 
         if let Err(e) = self.check_tool_scope(ctx, "execute_junos_command_batch") {
             audit.deny("tool_scope");
@@ -578,7 +632,12 @@ impl JmcpHandler {
             (None, Some(many)) => many.clone(),
             _ => Vec::new(),
         };
-        let mut audit = AuditScope::new(ctx, "render_and_apply_j2_template", "apply", resolved.clone());
+        let mut audit = AuditScope::new(
+            ctx,
+            "render_and_apply_j2_template",
+            "apply",
+            resolved.clone(),
+        );
 
         if let Err(e) = self.check_tool_scope(ctx, "render_and_apply_j2_template") {
             audit.deny("tool_scope");
@@ -599,7 +658,8 @@ impl JmcpHandler {
         }
         audit.meta("committed", args.apply_config && !args.dry_run);
 
-        let result = template::handle_with_cancel(args, self.dm.clone(), self.policy.load_full(), ct).await;
+        let result =
+            template::handle_with_cancel(args, self.dm.clone(), self.policy.load_full(), ct).await;
         match &result {
             Ok(v) => {
                 if let Some(rendered) = v.get("rendered").and_then(|r| r.as_str()) {
@@ -711,7 +771,12 @@ impl JmcpHandler {
         ct: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = caller_ctx(&extensions);
-        let mut audit = AuditScope::new(ctx, "transfer_file", "transfer", vec![args.router_name.clone()]);
+        let mut audit = AuditScope::new(
+            ctx,
+            "transfer_file",
+            "transfer",
+            vec![args.router_name.clone()],
+        );
 
         if let Err(e) = self.check_tool_scope(ctx, "transfer_file") {
             audit.deny("tool_scope");
@@ -723,7 +788,8 @@ impl JmcpHandler {
         }
         audit.meta("basename", args.source_path.clone());
 
-        let result = transfer_file::handle(args, self.dm.clone(), self.transfer_config().clone(), ct).await;
+        let result =
+            transfer_file::handle(args, self.dm.clone(), self.transfer_config().clone(), ct).await;
         match &result {
             Ok(v) => {
                 if let Some(sha256) = v.get("sha256").and_then(|s| s.as_str()) {
@@ -759,7 +825,8 @@ impl JmcpHandler {
         }
         audit.meta("basename", args.remote_path.clone());
 
-        let result = fetch_file::handle(args, self.dm.clone(), self.transfer_config().clone(), ct).await;
+        let result =
+            fetch_file::handle(args, self.dm.clone(), self.transfer_config().clone(), ct).await;
         match &result {
             Ok(v) => {
                 if let Some(sha256) = v.get("sha256").and_then(|s| s.as_str()) {
@@ -783,7 +850,12 @@ impl JmcpHandler {
         ct: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = caller_ctx(&extensions);
-        let mut audit = AuditScope::new(ctx, "upgrade_junos", "upgrade", vec![args.router_name.clone()]);
+        let mut audit = AuditScope::new(
+            ctx,
+            "upgrade_junos",
+            "upgrade",
+            vec![args.router_name.clone()],
+        );
 
         if let Err(e) = self.check_tool_scope(ctx, "upgrade_junos") {
             audit.deny("tool_scope");

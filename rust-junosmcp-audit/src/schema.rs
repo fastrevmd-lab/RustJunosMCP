@@ -24,11 +24,31 @@ pub enum AuditValue {
     Bool(bool),
 }
 
-impl From<&str> for AuditValue { fn from(v: &str) -> Self { AuditValue::Str(v.to_string()) } }
-impl From<String> for AuditValue { fn from(v: String) -> Self { AuditValue::Str(v) } }
-impl From<u64> for AuditValue { fn from(v: u64) -> Self { AuditValue::U64(v) } }
-impl From<usize> for AuditValue { fn from(v: usize) -> Self { AuditValue::U64(v as u64) } }
-impl From<bool> for AuditValue { fn from(v: bool) -> Self { AuditValue::Bool(v) } }
+impl From<&str> for AuditValue {
+    fn from(v: &str) -> Self {
+        AuditValue::Str(v.to_string())
+    }
+}
+impl From<String> for AuditValue {
+    fn from(v: String) -> Self {
+        AuditValue::Str(v)
+    }
+}
+impl From<u64> for AuditValue {
+    fn from(v: u64) -> Self {
+        AuditValue::U64(v)
+    }
+}
+impl From<usize> for AuditValue {
+    fn from(v: usize) -> Self {
+        AuditValue::U64(v as u64)
+    }
+}
+impl From<bool> for AuditValue {
+    fn from(v: bool) -> Self {
+        AuditValue::Bool(v)
+    }
+}
 
 impl Display for AuditValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -43,5 +63,9 @@ impl Display for AuditValue {
 /// Truncate an error Display to a bounded length for the audit event.
 pub fn bounded_error(e: impl Display) -> String {
     let s = e.to_string();
-    if s.len() <= 512 { s } else { format!("{}…", &s[..512]) }
+    if s.len() <= 512 {
+        s
+    } else {
+        format!("{}…", &s[..512])
+    }
 }

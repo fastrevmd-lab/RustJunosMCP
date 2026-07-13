@@ -278,6 +278,15 @@ before deploying. The same warnings apply.
   `pfe_command`) are capped at 1 MB. Batch lists are capped at 100
   routers and 50 commands.
 
+## Audit logging
+
+Both `rust-junosmcp` and `rust-srxmcp` emit structured audit events for every tool invocation. Each event records the caller, tool, target routers, authorization decision, outcome, and duration. See [`docs/AUDIT.md`](docs/AUDIT.md) for the full schema and forwarding guidance.
+
+| Flag | Environment Variable | Default | Description |
+|------|---------------------|---------|-------------|
+| `--audit-format` | `JMCP_AUDIT_FORMAT` (junos) / `JMCP_SRX_AUDIT_FORMAT` (srx) | `text` | Output format: `text` or `json`. |
+| `--audit-log-file` | `JMCP_AUDIT_LOG_FILE` (junos) / `JMCP_SRX_AUDIT_LOG_FILE` (srx) | (none) | Optional file path to append JSON events to (in addition to stderr). |
+
 ## Quick start (local)
 
 ```bash

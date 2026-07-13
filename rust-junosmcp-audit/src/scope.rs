@@ -36,7 +36,9 @@ impl AuditScope {
     ) -> Self {
         Self {
             correlation_id: mint_correlation_id(),
-            caller: ctx.map(|c| c.token_name.clone()).unwrap_or_else(|| "stdio".into()),
+            caller: ctx
+                .map(|c| c.token_name.clone())
+                .unwrap_or_else(|| "stdio".into()),
             tool,
             routers,
             action,
@@ -52,16 +54,24 @@ impl AuditScope {
     }
 
     /// Mark success.
-    pub fn succeed(&mut self) { self.outcome = AuditOutcome::Succeeded; }
+    pub fn succeed(&mut self) {
+        self.outcome = AuditOutcome::Succeeded;
+    }
 
     /// Mark failure with a generic kind (`"error"`).
     pub fn fail(&mut self, error: impl Display) {
-        self.outcome = AuditOutcome::Failed { kind: "error", msg: bounded_error(error) };
+        self.outcome = AuditOutcome::Failed {
+            kind: "error",
+            msg: bounded_error(error),
+        };
     }
 
     /// Mark failure with a specific stable kind (e.g. `"timeout"`, `"lease_busy"`).
     pub fn fail_kind(&mut self, kind: &'static str, error: impl Display) {
-        self.outcome = AuditOutcome::Failed { kind, msg: bounded_error(error) };
+        self.outcome = AuditOutcome::Failed {
+            kind,
+            msg: bounded_error(error),
+        };
     }
 
     /// Mark an authorization denial with a reason.
@@ -124,13 +134,22 @@ mod tests {
     use rust_junosmcp_auth::ScopeSet;
 
     fn ctx(name: &str) -> CallerCtx {
-        CallerCtx { token_name: name.into(), routers: ScopeSet::Wildcard, tools: ScopeSet::Wildcard }
+        CallerCtx {
+            token_name: name.into(),
+            routers: ScopeSet::Wildcard,
+            tools: ScopeSet::Wildcard,
+        }
     }
 
     #[test]
     fn success_emits_ok_with_duration_and_meta() {
         let out = run_with_capture(|| {
-            let mut a = AuditScope::new(Some(&ctx("ci")), "load_and_commit_config", "commit", vec!["r1".into()]);
+            let mut a = AuditScope::new(
+                Some(&ctx("ci")),
+                "load_and_commit_config",
+                "commit",
+                vec!["r1".into()],
+            );
             a.meta("config_bytes", 1234u64);
             a.succeed();
         });
@@ -146,7 +165,12 @@ mod tests {
     #[test]
     fn unsettled_when_dropped_without_outcome() {
         let out = run_with_capture(|| {
-            let _a = AuditScope::new(Some(&ctx("ci")), "upgrade_junos", "upgrade", vec!["r1".into()]);
+            let _a = AuditScope::new(
+                Some(&ctx("ci")),
+                "upgrade_junos",
+                "upgrade",
+                vec!["r1".into()],
+            );
         });
         assert!(out.contains("result=unsettled"));
     }
