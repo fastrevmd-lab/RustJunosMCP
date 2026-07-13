@@ -61,11 +61,55 @@ impl Display for AuditValue {
 }
 
 /// Truncate an error Display to a bounded length for the audit event.
+/// Truncates at the largest char boundary <= 512 bytes to avoid slicing
+/// mid-codepoint in multi-byte UTF-8 strings.
 pub fn bounded_error(e: impl Display) -> String {
     let s = e.to_string();
     if s.len() <= 512 {
         s
     } else {
-        format!("{}…", &s[..512])
+        // Truncate at the largest char boundary <= 512 bytes, then append an ellipsis.
+        let cut = (0..=512)
+            .rev()
+            .find(|&i| s.is_char_boundary(i))
+            .unwrap_or(0);
+        format!("{}…", &s[..cut])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_error_truncates_long_ascii() {
+        // >512-byte ASCII error should be truncated and end with …
+        let long_ascii = "A".repeat(600);
+        let result = bounded_error(&long_ascii);
+        assert!(result.ends_with('…'));
+        assert!(result.len() <= 515); // 512 bytes + "…" (3 bytes in UTF-8)
+        assert_eq!(result.len(), 512 + "…".len());
+    }
+
+    #[test]
+    fn bounded_error_truncates_multibyte_utf8() {
+        // Multibyte UTF-8 error should NOT panic and yield valid string with …
+        // "é" is 2 bytes in UTF-8; 400 chars = 800 bytes
+        let multibyte = "é".repeat(400);
+        assert_eq!(multibyte.len(), 800);
+        let result = bounded_error(&multibyte);
+        assert!(result.ends_with('…'));
+        assert!(result.len() <= 515);
+        // Must be valid UTF-8 (implicitly validated by String type, but let's be explicit)
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn bounded_error_short_strings_unchanged() {
+        let short = "error";
+        assert_eq!(bounded_error(short), "error");
+
+        let exactly_512 = "X".repeat(512);
+        assert_eq!(bounded_error(&exactly_512), exactly_512);
     }
 }
