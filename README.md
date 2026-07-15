@@ -574,6 +574,8 @@ generous values. Every numeric limit accepts `0` to disable it.
 Over-limit responses carry `Retry-After: 1`. Concurrency permits are released when
 the response stream ends. A multi-router call holds one router slot for each unique
 top-level `router`, `router_name`, `routers`, or `router_names` target.
+Per-router saturation is identified by the response body
+`{"error":"overloaded","limit":"router_concurrency"}`.
 
 The per-router HTTP permit is acquired before a destructive workflow waits for its
 cross-process device lease. A destructive call counts once while waiting for or
