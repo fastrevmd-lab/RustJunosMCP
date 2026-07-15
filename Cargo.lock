@@ -2517,6 +2517,7 @@ dependencies = [
  "futures",
  "http",
  "http-body",
+ "http-body-util",
  "rmcp",
  "rust-junosmcp-auth",
  "rust-junosmcp-core",

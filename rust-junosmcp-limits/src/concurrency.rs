@@ -14,6 +14,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use dashmap::DashMap;
 use http_body::{Body as HttpBody, Frame, SizeHint};
+use http_body_util::LengthLimitError;
 use rust_junosmcp_auth::caller::CallerCtx;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -142,12 +143,29 @@ async fn inspect_router_targets(req: Request) -> Result<(Request, Vec<String>), 
     let bytes = match axum::body::to_bytes(body, usize::MAX).await {
         Ok(bytes) => bytes,
         Err(error) => {
-            tracing::warn!(error = %error, "request body rejected while extracting router targets");
-            return Err(StatusCode::PAYLOAD_TOO_LARGE.into_response());
+            let status = if is_length_limit_error(&error) {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            tracing::warn!(error = %error, %status, "request body rejected while extracting router targets");
+            return Err(status.into_response());
         }
     };
     let targets = extract_router_targets(&bytes);
     Ok((Request::from_parts(parts, Body::from(bytes)), targets))
+}
+
+fn is_length_limit_error(mut error: &(dyn std::error::Error + 'static)) -> bool {
+    loop {
+        if error.is::<LengthLimitError>() {
+            return true;
+        }
+        let Some(source) = error.source() else {
+            return false;
+        };
+        error = source;
+    }
 }
 
 /// A session-creating request = POST without an `Mcp-Session-Id` header.
@@ -225,6 +243,8 @@ mod tests {
     use tokio::sync::Notify;
     use tokio::time::timeout;
     use tower::ServiceExt as _; // oneshot
+
+    const TEST_TIMEOUT: Duration = Duration::from_secs(1);
 
     fn ctx(name: &str) -> CallerCtx {
         CallerCtx {
@@ -309,7 +329,9 @@ mod tests {
                 .await
                 .unwrap()
         });
-        entered.notified().await;
+        timeout(TEST_TIMEOUT, entered.notified())
+            .await
+            .expect("first request did not enter the handler");
 
         let same = timeout(
             Duration::from_millis(200),
@@ -336,11 +358,19 @@ mod tests {
                 .await
                 .unwrap()
         });
-        entered.notified().await;
+        timeout(TEST_TIMEOUT, entered.notified())
+            .await
+            .expect("different-router request did not enter the handler");
 
         release.notify_waiters();
-        let first = first.await.unwrap();
-        let other = other.await.unwrap();
+        let first = timeout(TEST_TIMEOUT, first)
+            .await
+            .expect("first request did not finish")
+            .unwrap();
+        let other = timeout(TEST_TIMEOUT, other)
+            .await
+            .expect("different-router request did not finish")
+            .unwrap();
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(other.status(), StatusCode::OK);
         drop(first);
@@ -373,6 +403,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(admitted.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn aborted_request_releases_router_permit() {
+        let release = Arc::new(Notify::new());
+        let entered = Arc::new(Notify::new());
+        let app = blocking_post_router(release.clone(), entered.clone()).layer(
+            axum::middleware::from_fn_with_state(router_state(1), concurrency_middleware),
+        );
+
+        let first_app = app.clone();
+        let first = tokio::spawn(async move {
+            first_app
+                .oneshot(tool_request(json!({"router": "r1"})))
+                .await
+                .unwrap()
+        });
+        timeout(TEST_TIMEOUT, entered.notified())
+            .await
+            .expect("first request did not enter the handler");
+
+        first.abort();
+        let cancelled = timeout(TEST_TIMEOUT, first)
+            .await
+            .expect("aborted request task did not finish")
+            .expect_err("aborted request unexpectedly completed");
+        assert!(cancelled.is_cancelled());
+
+        let second_app = app.clone();
+        let second = tokio::spawn(async move {
+            second_app
+                .oneshot(tool_request(json!({"router": "r1"})))
+                .await
+                .unwrap()
+        });
+        timeout(TEST_TIMEOUT, entered.notified())
+            .await
+            .expect("router permit was not released after request cancellation");
+
+        release.notify_waiters();
+        let response = timeout(TEST_TIMEOUT, second)
+            .await
+            .expect("replacement request did not finish")
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -428,6 +503,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fallible_body_stream_is_bad_request_not_payload_too_large() {
+        let app = Router::new().route("/mcp", post(|| async { "ok" })).layer(
+            axum::middleware::from_fn_with_state(router_state(1), concurrency_middleware),
+        );
+        let stream = futures::stream::iter([Err::<Bytes, _>(std::io::Error::other(
+            "request body stream failed",
+        ))]);
+        let request = Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/mcp")
+            .body(Body::from_stream(stream))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn router_limit_composes_with_real_destructive_lease() {
         let directory = tempfile::tempdir().unwrap();
         let leases = Arc::new(
@@ -476,7 +569,9 @@ mod tests {
                 .await
                 .unwrap()
         });
-        entered.notified().await;
+        timeout(TEST_TIMEOUT, entered.notified())
+            .await
+            .expect("destructive request did not enter the handler");
 
         let shed = timeout(
             Duration::from_millis(200),
@@ -488,7 +583,7 @@ mod tests {
         assert_eq!(shed.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         drop(external);
-        let first = timeout(Duration::from_secs(1), first)
+        let first = timeout(TEST_TIMEOUT, first)
             .await
             .expect("first request deadlocked after lease release")
             .unwrap();
@@ -497,10 +592,13 @@ mod tests {
             .await
             .unwrap();
 
-        let admitted = app
-            .oneshot(tool_request(json!({"router": "r1"})))
-            .await
-            .unwrap();
+        let admitted = timeout(
+            TEST_TIMEOUT,
+            app.oneshot(tool_request(json!({"router": "r1"}))),
+        )
+        .await
+        .expect("request was not admitted after lease release")
+        .unwrap();
         assert_eq!(admitted.status(), StatusCode::OK);
     }
 
@@ -541,7 +639,10 @@ mod tests {
 
         // Release the first; its permit frees.
         release.notify_waiters();
-        let first = inflight.await.unwrap();
+        let first = timeout(TEST_TIMEOUT, inflight)
+            .await
+            .expect("global-limited request did not finish")
+            .unwrap();
         assert_eq!(first.status(), StatusCode::OK);
 
         // A new request now succeeds (permit freed at end-of-body).
@@ -594,8 +695,14 @@ mod tests {
 
         // Release both and verify "b" succeeded.
         release.notify_waiters();
-        let _ = inflight.await.unwrap();
-        let resp_b = req_b_task.await.unwrap();
+        let _ = timeout(TEST_TIMEOUT, inflight)
+            .await
+            .expect("token a request did not finish")
+            .unwrap();
+        let resp_b = timeout(TEST_TIMEOUT, req_b_task)
+            .await
+            .expect("token b request did not finish")
+            .unwrap();
         assert_eq!(resp_b.status(), StatusCode::OK);
     }
 }
