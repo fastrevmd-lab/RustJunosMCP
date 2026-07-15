@@ -12,8 +12,10 @@ axum         = { workspace = true }
 tower-http   = { workspace = true, features = ["limit"] }
 http         = { workspace = true }
 http-body    = { workspace = true }
+http-body-util = { workspace = true }
 rmcp         = { version = "2", features = ["server", "transport-streamable-http-server"] }
 rust-junosmcp-auth = { path = "../rust-junosmcp-auth" }
+serde_json    = { workspace = true }
 tokio        = { workspace = true }
 tokio-util   = { workspace = true }
 dashmap      = { workspace = true }
@@ -21,5 +23,7 @@ tracing      = { workspace = true }
 futures      = "0.3"
 
 [dev-dependencies]
+rust-junosmcp-core = { path = "../rust-junosmcp-core" }
+tempfile            = { workspace = true }
 tokio        = { workspace = true }
 tower        = { workspace = true }
