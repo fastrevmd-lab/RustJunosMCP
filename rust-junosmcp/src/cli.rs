@@ -110,6 +110,14 @@ pub struct Cli {
     )]
     pub max_inflight_requests_per_token: usize,
 
+    /// Max concurrent in-flight requests per target router. 0 = unlimited.
+    #[arg(
+        long,
+        env = "JMCP_MAX_INFLIGHT_REQUESTS_PER_ROUTER",
+        default_value_t = 4
+    )]
+    pub max_inflight_requests_per_router: usize,
+
     /// Max concurrent MCP sessions. 0 = unlimited.
     #[arg(long, env = "JMCP_MAX_SESSIONS", default_value_t = 128)]
     pub max_sessions: usize,
@@ -210,6 +218,19 @@ mod tests {
         assert!(cli.tokens_file.is_none());
         assert!(!cli.allow_no_auth);
         assert!(!cli.allow_insecure_bind);
+    }
+
+    #[test]
+    fn per_router_limit_defaults_and_parses() {
+        let default_cli = Cli::parse_from(["rust-junosmcp"]);
+        assert_eq!(default_cli.max_inflight_requests_per_router, 4);
+
+        let disabled =
+            Cli::parse_from(["rust-junosmcp", "--max-inflight-requests-per-router", "0"]);
+        assert_eq!(disabled.max_inflight_requests_per_router, 0);
+
+        let custom = Cli::parse_from(["rust-junosmcp", "--max-inflight-requests-per-router", "7"]);
+        assert_eq!(custom.max_inflight_requests_per_router, 7);
     }
 
     #[test]

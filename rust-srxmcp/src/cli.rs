@@ -85,6 +85,14 @@ pub struct Cli {
     )]
     pub max_inflight_requests_per_token: usize,
 
+    /// Max concurrent in-flight requests per target router. 0 = unlimited.
+    #[arg(
+        long,
+        env = "JMCP_SRX_MAX_INFLIGHT_REQUESTS_PER_ROUTER",
+        default_value_t = 4
+    )]
+    pub max_inflight_requests_per_router: usize,
+
     /// Max concurrent MCP sessions. 0 = unlimited.
     #[arg(long, env = "JMCP_SRX_MAX_SESSIONS", default_value_t = 128)]
     pub max_sessions: usize,
@@ -143,5 +151,17 @@ mod tests {
             cli.device_lease_dir,
             std::path::PathBuf::from("/var/lib/jmcp/device-leases")
         );
+    }
+
+    #[test]
+    fn per_router_limit_defaults_and_parses() {
+        let default_cli = Cli::parse_from(["rust-srxmcp"]);
+        assert_eq!(default_cli.max_inflight_requests_per_router, 4);
+
+        let disabled = Cli::parse_from(["rust-srxmcp", "--max-inflight-requests-per-router", "0"]);
+        assert_eq!(disabled.max_inflight_requests_per_router, 0);
+
+        let custom = Cli::parse_from(["rust-srxmcp", "--max-inflight-requests-per-router", "7"]);
+        assert_eq!(custom.max_inflight_requests_per_router, 7);
     }
 }
