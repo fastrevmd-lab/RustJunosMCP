@@ -10,6 +10,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **#153 - native journald audit sink.** Both binaries can opt into direct,
+  structured journald fan-out with `--audit-journald`; only `target="audit"`
+  events are routed, fields use a stable `AUDIT_` namespace, and an unavailable
+  journal fails startup instead of silently dropping the configured sink.
+
 - **#149 - Prometheus HTTP metrics.** Streamable HTTP can now expose an
   opt-in, unauthenticated `/metrics` route with bounded-label active-session,
   resource-limit, tool-duration, and reaper metrics. The route shares the
