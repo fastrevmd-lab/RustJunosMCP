@@ -1,10 +1,26 @@
 //! Stable overload responses: HTTP 503 + `Retry-After`, load-shed semantics.
 
-use axum::http::{header::RETRY_AFTER, StatusCode};
+use axum::http::{
+    header::{CONTENT_TYPE, RETRY_AFTER},
+    StatusCode,
+};
 use axum::response::{IntoResponse, Response};
 
 /// Seconds advertised in `Retry-After` on every shed response.
 const RETRY_AFTER_SECS: u64 = 1;
+
+pub(crate) fn rate_limited_response(retry_after_secs: u64) -> Response {
+    crate::prometheus::record_limit_hit("token_rate", "request_rejected");
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [
+            (RETRY_AFTER, retry_after_secs.to_string()),
+            (CONTENT_TYPE, "application/json".to_owned()),
+        ],
+        r#"{"error":"rate_limited","limit":"token_rate"}"#,
+    )
+        .into_response()
+}
 
 /// Build a stable overload response for the given limit kind
 /// (e.g. `"global_concurrency"`, `"token_concurrency"`, `"session_cap"`).
@@ -32,6 +48,37 @@ pub fn overload_response(limit_kind: &'static str) -> Response {
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rate_limited_response_has_stable_contract_and_metric() {
+        let (recorder, handle) = crate::prometheus::test_recorder("junos");
+        let response = metrics::with_local_recorder(&recorder, || rate_limited_response(3));
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "3");
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            body.as_ref(),
+            br#"{"error":"rate_limited","limit":"token_rate"}"#
+        );
+
+        handle.run_upkeep();
+        let text = handle.render();
+        let sample = text
+            .lines()
+            .find(|line| {
+                line.starts_with("junosmcp_limit_hits_total{")
+                    && line.contains("limit=\"token_rate\"")
+                    && line.contains("event=\"request_rejected\"")
+            })
+            .expect("token-rate rejection metric");
+        assert!(sample.ends_with(" 1"), "unexpected sample: {sample}");
+        assert!(!sample.contains("token="));
+    }
 
     #[test]
     fn overload_response_counts_each_fixed_limit_kind() {
