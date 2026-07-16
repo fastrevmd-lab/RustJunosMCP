@@ -4,7 +4,7 @@
 
 **Date:** 2026-07-15
 
-**Status:** Design approved; pending written-spec review
+**Status:** Approved
 
 ## Context
 
