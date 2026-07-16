@@ -99,8 +99,6 @@ async fn render_metrics(State(handle): State<PrometheusHandle>) -> Response {
         .into_response()
 }
 
-// Wired into limit and session paths in Task 2.
-#[allow(dead_code)]
 pub(crate) fn record_limit_hit(limit: &'static str, event: &'static str) {
     metrics::counter!(
         LIMIT_HITS_TOTAL,
@@ -110,17 +108,14 @@ pub(crate) fn record_limit_hit(limit: &'static str, event: &'static str) {
     .increment(1);
 }
 
-#[allow(dead_code)]
 pub(crate) fn increment_active_sessions() {
     metrics::gauge!(ACTIVE_SESSIONS).increment(1.0);
 }
 
-#[allow(dead_code)]
 pub(crate) fn decrement_active_sessions() {
     metrics::gauge!(ACTIVE_SESSIONS).decrement(1.0);
 }
 
-#[allow(dead_code)]
 pub(crate) fn record_session_reaped(reason: &'static str) {
     metrics::counter!(SESSIONS_REAPED_TOTAL, "reason" => reason).increment(1);
 }
