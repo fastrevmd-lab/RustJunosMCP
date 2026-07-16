@@ -7,7 +7,10 @@ use futures::Stream;
 use rmcp::model::{ClientJsonRpcMessage, ServerJsonRpcMessage};
 use rmcp::transport::common::server_side_http::{ServerSseMessage, SessionId};
 use rmcp::transport::streamable_http_server::session::{RestoreOutcome, SessionManager};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::fmt::{Display, Formatter};
+use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -218,7 +221,7 @@ impl SessionTracker {
     }
 
     #[cfg(test)]
-    fn pending_reservation_count(&self) -> usize {
+    pub(crate) fn pending_reservation_count(&self) -> usize {
         self.token_state().pending_reservations
     }
 
@@ -325,6 +328,56 @@ fn finish_reap(tracker: &SessionTracker, expired: ExpiredSession) {
     }
 }
 
+/// Error returned by [`LimitedSessionManager`].
+#[derive(Debug)]
+pub enum LimitedSessionManagerError<E> {
+    /// An error returned by the wrapped session manager.
+    Inner(E),
+    /// A newly created session lost the atomic global-cap race.
+    SessionCapExceeded,
+}
+
+impl<E: Display> Display for LimitedSessionManagerError<E> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Inner(error) => Display::fmt(error, f),
+            Self::SessionCapExceeded => f.write_str("global session capacity exceeded"),
+        }
+    }
+}
+
+impl<E> std::error::Error for LimitedSessionManagerError<E>
+where
+    E: std::error::Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Inner(error) => Some(error),
+            Self::SessionCapExceeded => None,
+        }
+    }
+}
+
+tokio::task_local! {
+    static SESSION_CAP_REJECTED: Cell<bool>;
+}
+
+pub(crate) async fn scope_session_cap_rejection<F>(future: F) -> (F::Output, bool)
+where
+    F: Future,
+{
+    SESSION_CAP_REJECTED
+        .scope(Cell::new(false), async move {
+            let output = future.await;
+            (output, SESSION_CAP_REJECTED.with(Cell::get))
+        })
+        .await
+}
+
+pub(crate) fn mark_session_cap_rejected() {
+    let _ = SESSION_CAP_REJECTED.try_with(|rejected| rejected.set(true));
+}
+
 /// Wraps an rmcp `SessionManager`, adding a session cap and idle/lifetime reaper.
 pub struct LimitedSessionManager<S> {
     inner: Arc<S>,
@@ -366,15 +419,49 @@ impl<S: SessionManager> LimitedSessionManager<S> {
 }
 
 impl<S: SessionManager> SessionManager for LimitedSessionManager<S> {
-    type Error = S::Error;
+    type Error = LimitedSessionManagerError<S::Error>;
     type Transport = S::Transport;
 
     async fn create_session(&self) -> Result<(SessionId, Self::Transport), Self::Error> {
-        let (id, transport) = self.inner.create_session().await?;
+        let (id, transport) = self
+            .inner
+            .create_session()
+            .await
+            .map_err(LimitedSessionManagerError::Inner)?;
         self.tracker.note_session_created(&id);
-        // Best-effort registration; the middleware early-shed is the primary cap gate.
-        self.tracker.try_register(id.clone(), Instant::now());
-        Ok((id, transport))
+        if self.tracker.try_register(id.clone(), Instant::now()) {
+            return Ok((id, transport));
+        }
+
+        drop(transport);
+        self.tracker.unregister(&id);
+        let inner = self.inner.clone();
+        let cleanup_id = id.clone();
+        let cleanup = tokio::spawn(async move { inner.close_session(&cleanup_id).await });
+        match cleanup.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    session_id = %id,
+                    error = %error,
+                    "rejected session cleanup failed"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %id,
+                    error = %error,
+                    "rejected session cleanup task failed"
+                );
+            }
+        }
+        tracing::warn!(
+            limit = "session_cap",
+            session_id = %id,
+            "session creation rejected after atomic registration"
+        );
+        mark_session_cap_rejected();
+        Err(LimitedSessionManagerError::SessionCapExceeded)
     }
 
     async fn initialize_session(
@@ -383,18 +470,24 @@ impl<S: SessionManager> SessionManager for LimitedSessionManager<S> {
         message: ClientJsonRpcMessage,
     ) -> Result<ServerJsonRpcMessage, Self::Error> {
         self.tracker.touch(id, Instant::now());
-        self.inner.initialize_session(id, message).await
+        self.inner
+            .initialize_session(id, message)
+            .await
+            .map_err(LimitedSessionManagerError::Inner)
     }
 
     async fn has_session(&self, id: &SessionId) -> Result<bool, Self::Error> {
         self.tracker.touch(id, Instant::now());
-        self.inner.has_session(id).await
+        self.inner
+            .has_session(id)
+            .await
+            .map_err(LimitedSessionManagerError::Inner)
     }
 
     async fn close_session(&self, id: &SessionId) -> Result<(), Self::Error> {
         let r = self.inner.close_session(id).await;
         self.tracker.unregister(id);
-        r
+        r.map_err(LimitedSessionManagerError::Inner)
     }
 
     async fn create_stream(
@@ -403,7 +496,10 @@ impl<S: SessionManager> SessionManager for LimitedSessionManager<S> {
         message: ClientJsonRpcMessage,
     ) -> Result<impl Stream<Item = ServerSseMessage> + Send + Sync + 'static, Self::Error> {
         self.tracker.touch(id, Instant::now());
-        self.inner.create_stream(id, message).await
+        self.inner
+            .create_stream(id, message)
+            .await
+            .map_err(LimitedSessionManagerError::Inner)
     }
 
     async fn accept_message(
@@ -412,7 +508,10 @@ impl<S: SessionManager> SessionManager for LimitedSessionManager<S> {
         message: ClientJsonRpcMessage,
     ) -> Result<(), Self::Error> {
         self.tracker.touch(id, Instant::now());
-        self.inner.accept_message(id, message).await
+        self.inner
+            .accept_message(id, message)
+            .await
+            .map_err(LimitedSessionManagerError::Inner)
     }
 
     async fn create_standalone_stream(
@@ -420,7 +519,10 @@ impl<S: SessionManager> SessionManager for LimitedSessionManager<S> {
         id: &SessionId,
     ) -> Result<impl Stream<Item = ServerSseMessage> + Send + Sync + 'static, Self::Error> {
         self.tracker.touch(id, Instant::now());
-        self.inner.create_standalone_stream(id).await
+        self.inner
+            .create_standalone_stream(id)
+            .await
+            .map_err(LimitedSessionManagerError::Inner)
     }
 
     async fn resume(
@@ -429,14 +531,21 @@ impl<S: SessionManager> SessionManager for LimitedSessionManager<S> {
         last_event_id: String,
     ) -> Result<impl Stream<Item = ServerSseMessage> + Send + Sync + 'static, Self::Error> {
         self.tracker.touch(id, Instant::now());
-        self.inner.resume(id, last_event_id).await
+        self.inner
+            .resume(id, last_event_id)
+            .await
+            .map_err(LimitedSessionManagerError::Inner)
     }
 
     async fn restore_session(
         &self,
         id: SessionId,
     ) -> Result<RestoreOutcome<Self::Transport>, Self::Error> {
-        let outcome = self.inner.restore_session(id.clone()).await?;
+        let outcome = self
+            .inner
+            .restore_session(id.clone())
+            .await
+            .map_err(LimitedSessionManagerError::Inner)?;
         if matches!(outcome, RestoreOutcome::Restored(_)) {
             self.tracker.try_register(id, Instant::now());
         }
@@ -447,12 +556,398 @@ impl<S: SessionManager> SessionManager for LimitedSessionManager<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::transport::Transport;
+    use rmcp::RoleServer;
+    use std::convert::Infallible;
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Barrier;
     use std::thread;
     use std::time::{Duration, Instant};
+    use tokio::sync::{Barrier as AsyncBarrier, Notify};
+    use tokio::time::timeout;
+
+    const ASYNC_TEST_TIMEOUT: Duration = Duration::from_secs(1);
 
     fn id(s: &str) -> SessionId {
         Arc::from(s)
+    }
+
+    #[derive(Debug)]
+    struct TestTransport;
+
+    impl Transport<RoleServer> for TestTransport {
+        type Error = Infallible;
+
+        fn send(
+            &mut self,
+            _item: ServerJsonRpcMessage,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            futures::future::ready(Ok(()))
+        }
+
+        fn receive(&mut self) -> impl Future<Output = Option<ClientJsonRpcMessage>> + Send {
+            futures::future::ready(None)
+        }
+
+        fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
+            futures::future::ready(Ok(()))
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TestManagerError(&'static str);
+
+    impl std::fmt::Display for TestManagerError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for TestManagerError {}
+
+    struct TestSessionState {
+        next_id: AtomicUsize,
+        live: Mutex<HashSet<SessionId>>,
+        closed: Mutex<Vec<SessionId>>,
+        create_barrier: Option<Arc<AsyncBarrier>>,
+        close_started: Notify,
+        close_release: Notify,
+        block_close: AtomicBool,
+        fail_close: AtomicBool,
+        fail_create: AtomicBool,
+        fail_has_session: AtomicBool,
+    }
+
+    #[derive(Clone)]
+    struct TestSessionManager {
+        state: Arc<TestSessionState>,
+    }
+
+    impl TestSessionManager {
+        fn new(create_barrier: Option<Arc<AsyncBarrier>>) -> Self {
+            Self {
+                state: Arc::new(TestSessionState {
+                    next_id: AtomicUsize::new(0),
+                    live: Mutex::new(HashSet::new()),
+                    closed: Mutex::new(Vec::new()),
+                    create_barrier,
+                    close_started: Notify::new(),
+                    close_release: Notify::new(),
+                    block_close: AtomicBool::new(false),
+                    fail_close: AtomicBool::new(false),
+                    fail_create: AtomicBool::new(false),
+                    fail_has_session: AtomicBool::new(false),
+                }),
+            }
+        }
+
+        fn live_ids(&self) -> HashSet<SessionId> {
+            self.state
+                .live
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+
+        fn closed_ids(&self) -> Vec<SessionId> {
+            self.state
+                .closed
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+
+        fn set_block_close(&self, enabled: bool) {
+            self.state.block_close.store(enabled, Ordering::SeqCst);
+        }
+
+        fn set_fail_close(&self, enabled: bool) {
+            self.state.fail_close.store(enabled, Ordering::SeqCst);
+        }
+
+        fn set_fail_create(&self, enabled: bool) {
+            self.state.fail_create.store(enabled, Ordering::SeqCst);
+        }
+
+        fn set_fail_has_session(&self, enabled: bool) {
+            self.state.fail_has_session.store(enabled, Ordering::SeqCst);
+        }
+
+        async fn wait_for_close_start(&self) {
+            self.state.close_started.notified().await;
+        }
+
+        fn release_close(&self) {
+            self.state.close_release.notify_one();
+        }
+    }
+
+    impl SessionManager for TestSessionManager {
+        type Error = TestManagerError;
+        type Transport = TestTransport;
+
+        async fn create_session(&self) -> Result<(SessionId, Self::Transport), Self::Error> {
+            if self.state.fail_create.load(Ordering::SeqCst) {
+                return Err(TestManagerError("create failed"));
+            }
+            let sequence = self.state.next_id.fetch_add(1, Ordering::SeqCst);
+            let session_id: SessionId = Arc::from(format!("test-session-{sequence}"));
+            self.state
+                .live
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(session_id.clone());
+            if let Some(barrier) = &self.state.create_barrier {
+                barrier.wait().await;
+            }
+            Ok((session_id, TestTransport))
+        }
+
+        async fn initialize_session(
+            &self,
+            _id: &SessionId,
+            _message: ClientJsonRpcMessage,
+        ) -> Result<ServerJsonRpcMessage, Self::Error> {
+            Err(TestManagerError("unused test operation"))
+        }
+
+        async fn has_session(&self, id: &SessionId) -> Result<bool, Self::Error> {
+            if self.state.fail_has_session.load(Ordering::SeqCst) {
+                return Err(TestManagerError("has failed"));
+            }
+            Ok(self
+                .state
+                .live
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains(id))
+        }
+
+        async fn close_session(&self, id: &SessionId) -> Result<(), Self::Error> {
+            self.state.close_started.notify_one();
+            if self.state.block_close.load(Ordering::SeqCst) {
+                self.state.close_release.notified().await;
+            }
+            let removed = self
+                .state
+                .live
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(id);
+            if removed {
+                self.state
+                    .closed
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(id.clone());
+            }
+            if self.state.fail_close.load(Ordering::SeqCst) {
+                Err(TestManagerError("close failed"))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn create_stream(
+            &self,
+            _id: &SessionId,
+            _message: ClientJsonRpcMessage,
+        ) -> Result<impl Stream<Item = ServerSseMessage> + Send + Sync + 'static, Self::Error>
+        {
+            Result::<futures::stream::Empty<ServerSseMessage>, _>::Err(TestManagerError(
+                "unused test operation",
+            ))
+        }
+
+        async fn accept_message(
+            &self,
+            _id: &SessionId,
+            _message: ClientJsonRpcMessage,
+        ) -> Result<(), Self::Error> {
+            Err(TestManagerError("unused test operation"))
+        }
+
+        async fn create_standalone_stream(
+            &self,
+            _id: &SessionId,
+        ) -> Result<impl Stream<Item = ServerSseMessage> + Send + Sync + 'static, Self::Error>
+        {
+            Result::<futures::stream::Empty<ServerSseMessage>, _>::Err(TestManagerError(
+                "unused test operation",
+            ))
+        }
+
+        async fn resume(
+            &self,
+            _id: &SessionId,
+            _last_event_id: String,
+        ) -> Result<impl Stream<Item = ServerSseMessage> + Send + Sync + 'static, Self::Error>
+        {
+            Result::<futures::stream::Empty<ServerSseMessage>, _>::Err(TestManagerError(
+                "unused test operation",
+            ))
+        }
+
+        async fn restore_session(
+            &self,
+            _id: SessionId,
+        ) -> Result<RestoreOutcome<Self::Transport>, Self::Error> {
+            Ok(RestoreOutcome::NotSupported)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn limited_manager_concurrent_create_admits_one_and_closes_every_loser() {
+        const CREATE_COUNT: usize = 4;
+        let fake = TestSessionManager::new(Some(Arc::new(AsyncBarrier::new(CREATE_COUNT))));
+        let manager = LimitedSessionManager::new(
+            fake.clone(),
+            &LimitsConfig {
+                max_sessions: 1,
+                ..Default::default()
+            },
+        );
+        let mut tasks = Vec::with_capacity(CREATE_COUNT);
+        for _ in 0..CREATE_COUNT {
+            let manager = manager.clone();
+            tasks.push(tokio::spawn(async move { manager.create_session().await }));
+        }
+
+        let mut winner_ids = HashSet::new();
+        let mut capacity_errors = 0;
+        for task in tasks {
+            match timeout(ASYNC_TEST_TIMEOUT, task)
+                .await
+                .expect("concurrent create timed out")
+                .expect("concurrent create task panicked")
+            {
+                Ok((session_id, _transport)) => {
+                    assert!(winner_ids.insert(session_id));
+                }
+                Err(LimitedSessionManagerError::SessionCapExceeded) => capacity_errors += 1,
+                Err(error) => panic!("unexpected manager error: {error}"),
+            }
+        }
+
+        assert_eq!(winner_ids.len(), 1);
+        assert_eq!(capacity_errors, CREATE_COUNT - 1);
+        assert_eq!(manager.tracker().active(), 1);
+        assert_eq!(fake.live_ids(), winner_ids);
+        let closed_ids = fake.closed_ids();
+        assert_eq!(closed_ids.len(), CREATE_COUNT - 1);
+        assert_eq!(closed_ids.iter().cloned().collect::<HashSet<_>>().len(), 3);
+        assert!(closed_ids
+            .iter()
+            .all(|session_id| !fake.live_ids().contains(session_id)));
+
+        let winner_id = winner_ids.into_iter().next().unwrap();
+        manager.close_session(&winner_id).await.unwrap();
+        assert_eq!(manager.tracker().active(), 0);
+        assert!(fake.live_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn limited_manager_cleanup_error_still_returns_capacity_and_removes_loser() {
+        let fake = TestSessionManager::new(None);
+        let manager = LimitedSessionManager::new(
+            fake.clone(),
+            &LimitsConfig {
+                max_sessions: 1,
+                ..Default::default()
+            },
+        );
+        let (winner_id, _transport) = manager.create_session().await.unwrap();
+        fake.set_fail_close(true);
+
+        let (result, rejected) = scope_session_cap_rejection(manager.create_session()).await;
+        assert!(rejected);
+        assert!(matches!(
+            result,
+            Err(LimitedSessionManagerError::SessionCapExceeded)
+        ));
+        assert_eq!(manager.tracker().active(), 1);
+        assert_eq!(fake.live_ids(), HashSet::from([winner_id.clone()]));
+        assert_eq!(fake.closed_ids().len(), 1);
+
+        fake.set_fail_close(false);
+        manager.close_session(&winner_id).await.unwrap();
+        assert_eq!(manager.tracker().active(), 0);
+        assert!(fake.live_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn limited_manager_rejected_cleanup_survives_outer_cancellation() {
+        let fake = TestSessionManager::new(None);
+        let manager = LimitedSessionManager::new(
+            fake.clone(),
+            &LimitsConfig {
+                max_sessions: 1,
+                ..Default::default()
+            },
+        );
+        let (winner_id, _transport) = manager.create_session().await.unwrap();
+        fake.set_block_close(true);
+
+        let losing_manager = manager.clone();
+        let losing_create = tokio::spawn(async move { losing_manager.create_session().await });
+        timeout(ASYNC_TEST_TIMEOUT, fake.wait_for_close_start())
+            .await
+            .expect("rejected cleanup did not start");
+        losing_create.abort();
+        let cancelled = timeout(ASYNC_TEST_TIMEOUT, losing_create)
+            .await
+            .expect("aborted create task did not finish")
+            .expect_err("aborted create unexpectedly completed");
+        assert!(cancelled.is_cancelled());
+
+        fake.release_close();
+        timeout(ASYNC_TEST_TIMEOUT, async {
+            loop {
+                if fake.live_ids() == HashSet::from([winner_id.clone()])
+                    && fake.closed_ids().len() == 1
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached rejected-session cleanup did not finish");
+
+        fake.set_block_close(false);
+        manager.close_session(&winner_id).await.unwrap();
+        assert_eq!(manager.tracker().active(), 0);
+        assert!(fake.live_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn limited_manager_wraps_inner_create_and_delegated_errors() {
+        let fake = TestSessionManager::new(None);
+        fake.set_fail_create(true);
+        let manager = LimitedSessionManager::new(fake.clone(), &LimitsConfig::default());
+
+        let create_error = manager.create_session().await.unwrap_err();
+        assert!(matches!(
+            &create_error,
+            LimitedSessionManagerError::Inner(TestManagerError("create failed"))
+        ));
+        assert_eq!(
+            std::error::Error::source(&create_error)
+                .expect("inner create error source")
+                .to_string(),
+            "create failed"
+        );
+
+        fake.set_fail_create(false);
+        fake.set_fail_has_session(true);
+        let has_error = manager.has_session(&id("missing")).await.unwrap_err();
+        assert!(matches!(
+            &has_error,
+            LimitedSessionManagerError::Inner(TestManagerError("has failed"))
+        ));
+
+        mark_session_cap_rejected();
     }
 
     #[test]
@@ -748,45 +1243,6 @@ mod tests {
         tracker.unregister(&session);
         assert_eq!(tracker.active_for_token("alice"), 0);
         assert_eq!(tracker.token_population_len(), 0);
-    }
-
-    #[test]
-    fn globally_untracked_live_session_still_binds_token_reservation() {
-        let tracker = Arc::new(SessionTracker::new(&LimitsConfig {
-            max_sessions: 1,
-            max_sessions_per_token: 1,
-            ..Default::default()
-        }));
-        let occupied = id("globally-tracked");
-        let session = id("live-but-globally-untracked");
-        assert!(tracker.try_register(occupied.clone(), Instant::now()));
-        let reservation = tracker
-            .try_reserve_token("alice".to_owned())
-            .unwrap()
-            .unwrap();
-        tracker.note_session_created(&session);
-        tracker.note_session_created(&id("other-real-created"));
-        assert_eq!(tracker.created_unbound_len(), 2);
-
-        // `LimitedSessionManager::create_session` treats global registration as
-        // best effort and still returns the live inner session in this case.
-        assert!(!tracker.try_register(session.clone(), Instant::now()));
-        assert_eq!(tracker.pending_reservation_count(), 1);
-        assert_eq!(tracker.closed_before_bind_len(), 0);
-
-        assert!(reservation.commit(session.clone()));
-        assert_eq!(tracker.active_for_token("alice"), 1);
-        assert_eq!(tracker.token_binding_len(), 1);
-        assert_eq!(tracker.pending_reservation_count(), 0);
-        assert_eq!(tracker.created_unbound_len(), 0);
-        assert_eq!(tracker.closed_before_bind_len(), 0);
-
-        tracker.unregister(&session);
-        assert_eq!(tracker.active_for_token("alice"), 0);
-        assert_eq!(tracker.token_population_len(), 0);
-        assert_eq!(tracker.token_binding_len(), 0);
-        tracker.unregister(&occupied);
-        assert_eq!(tracker.active(), 0);
     }
 
     #[test]
