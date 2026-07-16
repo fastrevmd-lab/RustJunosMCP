@@ -216,6 +216,7 @@ fn remove_without_following(path: &Path) {
 #[derive(Debug)]
 pub struct PreparedBundlePaths {
     staging_root: PathBuf,
+    staging_max_bytes: u64,
     router_dir: PathBuf,
     scratch_dir: PathBuf,
     tarball_path: PathBuf,
@@ -228,11 +229,17 @@ impl PreparedBundlePaths {
         router: &str,
         filesystem_id: &str,
     ) -> Result<Self, SrxError> {
-        Self::prepare_under(config.directory(), router, filesystem_id)
+        Self::prepare_under(
+            config.directory(),
+            config.max_bytes(),
+            router,
+            filesystem_id,
+        )
     }
 
     pub(crate) fn prepare_under(
         configured_root: &Path,
+        staging_max_bytes: u64,
         router: &str,
         filesystem_id: &str,
     ) -> Result<Self, SrxError> {
@@ -279,6 +286,7 @@ impl PreparedBundlePaths {
 
         Ok(Self {
             staging_root,
+            staging_max_bytes,
             router_dir,
             scratch_dir,
             tarball_path,
@@ -288,6 +296,10 @@ impl PreparedBundlePaths {
 
     pub fn router_dir(&self) -> &Path {
         &self.router_dir
+    }
+
+    pub(crate) fn staging_max_bytes(&self) -> u64 {
+        self.staging_max_bytes
     }
 
     pub fn scratch_dir(&self) -> &Path {
@@ -365,6 +377,9 @@ mod tests {
             bundle_tarball_path(&config, "srx-01", "srxmcp-request-1").unwrap(),
             root.path().join("srx-01/srxmcp-request-1.tgz")
         );
+
+        let paths = PreparedBundlePaths::prepare(&config, "srx-01", "srxmcp-request-1").unwrap();
+        assert_eq!(paths.staging_max_bytes(), 123_456);
     }
 
     #[test]
@@ -454,6 +469,7 @@ mod tests {
         let (scratch, tarball) = {
             let paths = PreparedBundlePaths::prepare_under(
                 temp.path(),
+                DEFAULT_STAGING_MAX_BYTES,
                 "vSRX-test10",
                 "srxmcp-cleanup-test",
             )
@@ -477,8 +493,12 @@ mod tests {
         let tarball = router_dir.join("srxmcp-collision-test.tgz");
         fs::write(&tarball, b"existing").unwrap();
 
-        let result =
-            PreparedBundlePaths::prepare_under(temp.path(), "vSRX-test10", "srxmcp-collision-test");
+        let result = PreparedBundlePaths::prepare_under(
+            temp.path(),
+            DEFAULT_STAGING_MAX_BYTES,
+            "vSRX-test10",
+            "srxmcp-collision-test",
+        );
         assert!(result.is_err());
         assert_eq!(fs::read(&tarball).unwrap(), b"existing");
         assert!(!router_dir.join("srxmcp-collision-test-scratch").exists());
@@ -496,8 +516,12 @@ mod tests {
         fs::write(&outside, b"do not overwrite").unwrap();
         symlink(&outside, router_dir.join("srxmcp-symlink-target.tgz")).unwrap();
 
-        let result =
-            PreparedBundlePaths::prepare_under(temp.path(), "vSRX-test10", "srxmcp-symlink-target");
+        let result = PreparedBundlePaths::prepare_under(
+            temp.path(),
+            DEFAULT_STAGING_MAX_BYTES,
+            "vSRX-test10",
+            "srxmcp-symlink-target",
+        );
         assert!(result.is_err());
         assert_eq!(fs::read(&outside).unwrap(), b"do not overwrite");
         assert!(!router_dir.join("srxmcp-symlink-target-scratch").exists());
@@ -515,7 +539,12 @@ mod tests {
         fs::create_dir(&outside).unwrap();
         symlink(&outside, root.join("router1")).unwrap();
 
-        let result = PreparedBundlePaths::prepare_under(&root, "router1", "srxmcp-symlink-test");
+        let result = PreparedBundlePaths::prepare_under(
+            &root,
+            DEFAULT_STAGING_MAX_BYTES,
+            "router1",
+            "srxmcp-symlink-test",
+        );
         assert!(result.is_err());
         assert!(fs::read_dir(&outside).unwrap().next().is_none());
     }

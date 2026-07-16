@@ -404,7 +404,6 @@ async fn collect_generic(
         artefacts,
         &problem_types,
         redacted,
-        staging,
     )
 }
 
@@ -644,7 +643,6 @@ async fn collect_per_type(
         artefacts,
         problem_types,
         any_redacted,
-        staging,
     )
 }
 
@@ -663,7 +661,6 @@ fn finalize_lxc_bundle(
     artefacts: Vec<CapturedArtefact>,
     problem_types: &BTreeSet<ProblemType>,
     any_redacted: bool,
-    staging: &SupportBundleStagingConfig,
 ) -> Result<SupportBundleData, SrxError> {
     paths.ensure_confined()?;
     let scratch = paths.scratch_dir().to_path_buf();
@@ -710,7 +707,7 @@ fn finalize_lxc_bundle(
     }
 
     // Enforce staging cap (LRU eviction) — stub today.
-    let _ = enforce_staging_cap(staging.max_bytes());
+    let _ = enforce_staging_cap(paths.staging_max_bytes());
 
     let tarball_bytes = std::fs::metadata(&tarball_path)
         .map(|m| m.len())
@@ -925,8 +922,13 @@ mod tests {
         let router = "vSRX-finalize-unit";
         let request_id = "srxmcp-unit-0001";
         let filesystem_id = "srxmcp-12345678-1234-1234-1234-123456789abc";
-        let mut paths =
-            PreparedBundlePaths::prepare_under(tmp.path(), router, filesystem_id).unwrap();
+        let mut paths = PreparedBundlePaths::prepare_under(
+            tmp.path(),
+            staging.max_bytes(),
+            router,
+            filesystem_id,
+        )
+        .unwrap();
         let scratch = paths.scratch_dir().to_path_buf();
         let payload = b"hello tech-support output";
         std::fs::write(scratch.join("request-support-information.txt"), payload).expect("write");
@@ -953,7 +955,6 @@ mod tests {
             artefacts,
             &problem_types,
             false,
-            &staging,
         )
         .expect("finalize");
 
