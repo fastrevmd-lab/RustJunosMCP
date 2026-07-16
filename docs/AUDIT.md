@@ -138,6 +138,7 @@ Both binaries support identical audit configuration:
 |------|---------------------|---------|-------------|
 | `--audit-format` | `JMCP_AUDIT_FORMAT` | `text` | Output format: `text` or `json`. |
 | `--audit-log-file` | `JMCP_AUDIT_LOG_FILE` | (none) | Optional file path to append JSON events to (in addition to stderr). |
+| `--audit-journald` | `JMCP_AUDIT_JOURNALD` | `false` | Also send `target="audit"` events directly to journald as native structured fields. Startup fails if journald is unavailable. |
 
 ### `rust-srxmcp`
 
@@ -145,16 +146,67 @@ Both binaries support identical audit configuration:
 |------|---------------------|---------|-------------|
 | `--audit-format` | `JMCP_SRX_AUDIT_FORMAT` | `text` | Output format: `text` or `json`. |
 | `--audit-log-file` | `JMCP_SRX_AUDIT_LOG_FILE` | (none) | Optional file path to append JSON events to (in addition to stderr). |
+| `--audit-journald` | `JMCP_SRX_AUDIT_JOURNALD` | `false` | Also send `target="audit"` events directly to journald as native structured fields. Startup fails if journald is unavailable. |
 
 ## Retention & Forwarding
 
 ### journald
 
-When running under systemd, audit events written to stderr are captured by `journald`. Query with:
+By default, services running under systemd write their normal text/JSON stderr
+stream into the journal. Set `--audit-journald` (or the binary-specific
+environment variable above) to add a second, native journal record for every
+`target="audit"` event. The native target is disabled by default and does not
+replace stderr or `--audit-log-file`.
+
+Enabling the target probes `/run/systemd/journal/socket` during startup. A
+missing or inaccessible socket aborts startup with `initializing audit tracing`
+and the operating-system error; the service never silently claims that an
+explicitly requested sink is active. The upstream tracing layer cannot return
+per-event send failures after initialization, so stderr and the optional file
+sink remain the fallback if journald later becomes unavailable.
+
+When systemd also captures stderr, an audit operation can appear twice: once as
+the formatted stderr `MESSAGE`, and once as the native entry with indexed
+`AUDIT_*` fields. Select `TARGET=audit` to consume only native entries.
+
+#### Native field mapping
+
+| Journal field | Audit value |
+|---------------|-------------|
+| `TARGET` | `audit` |
+| `PRIORITY` | `5` (`NOTICE`; audit events use tracing `INFO`) |
+| `SYSLOG_IDENTIFIER` | `rust-junosmcp` or `rust-srxmcp` |
+| `MESSAGE` | `audit` |
+| `AUDIT_CORRELATION_ID` | `correlation_id` |
+| `AUDIT_CALLER` | `caller` |
+| `AUDIT_TOOL` | `tool` |
+| `AUDIT_ROUTERS` | `routers` |
+| `AUDIT_ROUTER_COUNT` | `router_count` |
+| `AUDIT_ACTION` | `action` |
+| `AUDIT_AUTHORIZATION` | `authorization` |
+| `AUDIT_RESULT` | `result` |
+| `AUDIT_DURATION_MS` | `duration_ms` |
+| `AUDIT_ERROR_KIND` | `error_kind` |
+| `AUDIT_ERROR` | `error` |
+| `AUDIT_REASON` | `reason` |
+| `AUDIT_METADATA` | `metadata` |
+
+The journal stores values as byte strings, but every field remains separately
+indexed; consumers do not parse the JSON formatter's nested `fields` object.
+Redaction is applied before fan-out, so native values match the redacted stderr
+and file values.
+
+Query native Junos and SRX audit entries with:
 
 ```bash
-journalctl -u rust-junosmcp.service --output=json | jq -r 'select(.TARGET == "audit")'
+journalctl -t rust-junosmcp TARGET=audit
+journalctl -t rust-srxmcp TARGET=audit
+journalctl -t rust-junosmcp -o json | jq 'select(.TARGET == "audit")'
 ```
+
+Direct RFC 5424 formatting and remote syslog transport are not implemented by
+this option. Forward native journal fields with the host's journald/rsyslog or
+SIEM integration when remote delivery is required.
 
 ### File sink
 
@@ -213,7 +265,7 @@ rust-junosmcp \
 Ingest via:
 
 - **Filebeat / Fluentd / Vector** — tail the JSON log file or `journalctl` output.
-- **Syslog sink** — deferred (see below).
+- **Direct RFC 5424 syslog sink** — deferred; native journald forwarding is available above.
 
 Filter on `target == "audit"` to separate audit events from operational logs.
 
@@ -221,7 +273,7 @@ Filter on `target == "audit"` to separate audit events from operational logs.
 
 The following capabilities are planned but not yet implemented:
 
-1. **Syslog / journald native sink** — currently, the tracing JSON layer writes to stderr only. A future release may add a dedicated syslog or journald subscriber.
+1. **Direct RFC 5424 syslog sink** — native journald is implemented via `--audit-journald`, while direct RFC 5424 formatting and remote transport remain unimplemented and can be provided by the host's journald/rsyslog/SIEM integration.
 2. **Built-in log rotation** — the server does not manage file rotation in-process; retention is handled by the shipped `logrotate` fragment (see [Rotation & retention](#rotation--retention)). In-process size/age rotation with `SIGHUP`-reopen support remains out of scope by design.
 3. **Per-field encryption** — sensitive metadata fields can be dropped or replaced with a keyed HMAC fingerprint via [Field redaction](#field-redaction). *Reversible* envelope encryption (recover the original from logs with a key) remains out of scope.
 
