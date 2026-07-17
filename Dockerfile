@@ -34,4 +34,5 @@ ENV RUST_LOG=info \
     JMCP_SUPPORT_BUNDLE_STAGING_MAX_BYTES=524288000
 VOLUME ["/var/lib/jmcp"]
 USER 65532:65532
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 CMD kill -0 1
 ENTRYPOINT ["/usr/local/bin/rust-junosmcp", "-f", "/etc/jmcp/devices.json", "--staging-dir", "/var/lib/jmcp/staging", "--known-hosts-file", "/var/lib/jmcp/known_hosts", "--device-lease-dir", "/var/lib/jmcp/device-leases"]
